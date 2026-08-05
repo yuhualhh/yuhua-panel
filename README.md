@@ -6,10 +6,9 @@
 
 ## 界面预览
 
-![界面预览 1](https://gcore.jsdelivr.net/gh/lhz03/img@93c6e0f2c17259691176c5187c547b034fc5be86/2026/08/05/5f34024a4c18c59b7c065a65044b8b4a.png)
+![界面预览 1](https://gcore.jsdelivr.net/gh/lhz03/img@7387bc8c8d52ce15d22b5e99570ef795ac59abdc/2026/08/05/8e8e5231776721b9db197394aa424fba.png)
 
-
-![界面预览 2](https://gcore.jsdelivr.net/gh/lhz03/img@f88536ba9b5a121b5c3be02c85747a98758de49d/2026/08/05/5f47824b679a336608640aae521b8878.png)
+![界面预览 2](https://gcore.jsdelivr.net/gh/lhz03/img@f0a329b7c7bdb70180be4de70574ad1822b3f0d0/2026/08/05/7227dabbe023a7a35f40ab5c23f218a3.png)
 
 ## 快速开始
 
