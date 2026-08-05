@@ -1,0 +1,15 @@
+services:
+  yuhua-panel:
+    image: yuhualhh/yuhua-panel:latest
+    container_name: yuhua-panel
+    restart: unless-stopped
+    ports:
+      - "6060:6060"
+    environment:
+      SILLYGIRL_DATA_PATH: /data
+      # SILLYGIRL_AUTH_SERVER: https://yuhualhh.250666.xyz/shouquan/auth.php
+    volumes:
+      # 宿主机 /root/yuhua-panel 根目录：主程序放这里（自动下载/手动解压/自更新都落此）
+      # 数据目录 data/ 也在此目录下
+      - ${YUHUA_PANEL_DIR:-/root/yuhua-panel}:/app/main
+      - ${YUHUA_PANEL_DIR:-/root/yuhua-panel}/data:/data
