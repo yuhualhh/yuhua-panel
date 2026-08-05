@@ -1594,7 +1594,7 @@ Host丨ClientID丨ClientSecret
 ==================""")
             exit(0)
             
-        QLurl = qllist[0].strip()
+        QLurl = qllist[0].strip().rstrip('/')
         ClientID = qllist[1].strip()
         ClientSecret = qllist[2].strip()
         
