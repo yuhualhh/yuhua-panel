@@ -435,7 +435,7 @@ def init_qinglong():
         if len(ql_params) != 3:
             sender.reply("❌ 青龙配置格式错误")
             exit(0)
-        ql_url = ql_params[0].strip()
+        ql_url = ql_params[0].strip().rstrip('/')
         client_id = ql_params[1].strip()
         client_secret = ql_params[2].strip()
         if not all([ql_url, client_id, client_secret]):
