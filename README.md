@@ -20,7 +20,7 @@
 
 ## Docker 部署（推荐）
 
-镜像内置 Node 24 + Python 3.12 插件运行时，首次启动自动下载最新版主程序到宿主机 `/root/yuhua-panel/`。
+镜像内置 Node 24 + Python 3.12 插件运行时，支持 **amd64 / arm64** 双架构，首次启动自动下载最新版主程序到宿主机 `/root/yuhua-panel/`。
 
 ### 国内服务器拉取镜像加速
 
@@ -29,7 +29,7 @@ Docker Hub 直连易断，先配置镜像加速器：
 ```bash
 cat > /etc/docker/daemon.json <<'EOF'
 {
-  "registry-mirrors": ["https://docker.1panel.live"]
+  "registry-mirrors": ["https://docker.m.daocloud.io"]
 }
 EOF
 systemctl restart docker
