@@ -2,7 +2,7 @@
 # [title: 支付接管]
 # [language: python]
 # [icon: https://gcore.jsdelivr.net/gh/lhz03/img@9ae7129b6ed8df625254f8d5124497313838f109/2026/04/10/ed70df4c4bd110811434662c2ec69a51.png]
-#[rule: ^(支付接管|.*中间件|.*支付接管|核心(积分|卡密).*)$]
+#[rule: ^(支付接管|.*支付接管|核心(积分|卡密).*)$]
 # [disable:false]
 # [router: /epay_hijack]
 # [method: post]
@@ -10,12 +10,12 @@
 # [public: true]
 # [open_source: false]
 # [class: 工具类]
-# [version: 1.0.4]
+# [version: 1.0.5]
 # [price: 0]
 # [admin: false]
 # [author: yuhualhh]
 # [service: 2550306191]
-# [description: ❶该插件可为任意订阅源的Python、NodeJS插件提供支付接管与积分卡密系统服务。使内置微信支付被支付宝商家账单免挂或易支付或积分抵扣所接管，同时兼容V1接口(MD5签名方式)各大码支付平台<br>❷先发指令『替换中间件』待提示替换成功，继续发送指令『开启支付接管』待提示已开启，然后重启奥特曼使插件生效，再发指令『管理支付接管』添加需启用支付接管的插件。如需暂时关闭则发指令『关闭支付接管』<br>❸使用本插件需授予一定权限，前往"系统管理-插件权限"全部启用<br>❹更新日志: 2026.07.07 00:35 自动识别待付金额无需手动输入核对，需发指令『替换中间件』更新一下<img src="https://gcore.jsdelivr.net/gh/lhz03/img@29949cd67168912e9b439d29d52a1a509fc70be2/2026/03/28/72bbaadb24ca85e3afb59b270e448cdd.png">]
+# [description: ❶该插件可为任意插件源的Python、NodeJS插件提供支付接管与积分卡密系统服务。使内置微信支付被支付宝商家账单免挂或易支付或积分抵扣所接管，同时兼容V1接口(MD5签名方式)各大码支付平台<br>❷先发指令『开启支付接管』待提示已开启，再发指令『管理支付接管』添加需启用支付接管的插件。如需暂时关闭则发指令『关闭支付接管』<img src="https://gcore.jsdelivr.net/gh/lhz03/img@29949cd67168912e9b439d29d52a1a509fc70be2/2026/03/28/72bbaadb24ca85e3afb59b270e448cdd.png">]
 import middleware,requests,re,os,importlib,json,threading,shutil,time,random,sys
 from datetime import datetime
 from requests.exceptions import ConnectionError, Timeout
