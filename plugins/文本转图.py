@@ -2,7 +2,7 @@
 # [title: 文本转图]
 # [language: python]
 # [icon: https://gcore.jsdelivr.net/gh/lhz03/img@c444ef7846496b486d2e5b1bf9c7ca6905619949/2026/04/10/67e3d3aeb941bce23849692787716acf.png]
-#[rule: ^(文本转图|.*中间件|.*文本转图|切换转图主题.*|设置转图接口.*)$]
+#[rule: ^(文本转图|.*文本转图|切换转图主题.*|设置转图接口.*)$]
 # [disable:false]
 # [router: /text2image]
 # [method: post]
@@ -10,12 +10,12 @@
 # [public: true]
 # [open_source: false]
 # [class: 工具类]
-# [version: 1.0.3]
+# [version: 1.0.4]
 # [price: 0]
 # [admin: false]
 # [author: yuhualhh]
 # [service: 2550306191]
-# [description: ❶该插件可为任意订阅源的Python、NodeJS插件提供文本转图服务。使其文本内容替换成图片输出，可有效降低各大社交平台文本检测封禁风险。<br>❷先发指令『替换中间件』待提示替换成功，继续发送指令『开启文本转图』待提示已开启，然后重启奥特曼使插件生效，再发指令『管理文本转图』添加需启用文本转图的插件。如需暂时关闭则发指令『关闭文本转图』，如需彻底移除则发指令『还原中间件』<br>❸仅限奥特曼3.7.1及以上版本使用，当更新与回退奥特曼时需重发指令『替换中间件』，使用本插件需授予一定权限，前往"系统管理-插件权限"全部启用<br>❹更新日志: 2026.04.10 00:45 将羽化核心拆分成文本转图与支付接管两个单独的插件，需发指令『替换中间件』更新一下<br>❺请把插件触发规则全部替换成^(文本转图|.*中间件|.*文本转图|切换转图主题.*|设置转图接口.*)$<img src="https://gcore.jsdelivr.net/gh/lhz03/img@29949cd67168912e9b439d29d52a1a509fc70be2/2026/03/28/72bbaadb24ca85e3afb59b270e448cdd.png">]
+# [description: ❶该插件可为消息规则的问答回复以及任意插件源的Python、NodeJS插件提供文本转图服务。使其文本内容替换成图片输出，可有效降低各大社交平台文本检测封禁风险。<br>❷先送指令『开启文本转图』待提示已开启，再发指令『管理文本转图』添加需启用文本转图的插件。如需暂时关闭则发指令『关闭文本转图』<img src="https://gcore.jsdelivr.net/gh/lhz03/img@29949cd67168912e9b439d29d52a1a509fc70be2/2026/03/28/72bbaadb24ca85e3afb59b270e448cdd.png">]
 
 import middleware
 import base64
@@ -1387,7 +1387,11 @@ def handle_plugin_management(sender: middleware.Sender, title: str, bucket_name:
                 plugin_names.discard(_protected_plugin_title)
 
             # 转换为有序列表以固定显示顺序
-            sorted_plugins = sorted(list(plugin_names))
+            # 「消息规则-回复」为固定条目，永远置顶为 [0]（序号即其在列表中的位置）：
+            # 管理员可开启/关闭文本转图对消息规则（自动回复）的接管，不可移除
+            if "消息规则-回复" in plugin_names:
+                plugin_names.discard("消息规则-回复")
+            sorted_plugins = ["消息规则-回复"] + sorted(list(plugin_names))
 
             total_count = len(sorted_plugins)
             enabled_count = len(enabled_set)
@@ -1402,7 +1406,8 @@ def handle_plugin_management(sender: middleware.Sender, title: str, bucket_name:
                 "------------------"
             ]
 
-            for idx, p_name in enumerate(sorted_plugins, 1):
+            # 序号从 0 开始：[0] 固定为「消息规则-回复」，其余插件从 [1] 起
+            for idx, p_name in enumerate(sorted_plugins, 0):
                 status = "✅ 开启" if p_name in enabled_set else "❌ 关闭"
                 reply_lines.append(f"[{idx}] {p_name}\n    {status}")
 
@@ -1442,7 +1447,7 @@ def handle_plugin_management(sender: middleware.Sender, title: str, bucket_name:
 
                 target_plugin = None
                 if target.isdigit():
-                    idx = int(target) - 1
+                    idx = int(target)
                     if 0 <= idx < len(sorted_plugins):
                         target_plugin = sorted_plugins[idx]
                 else:
