@@ -29,7 +29,7 @@ Docker Hub 直连易断，先配置镜像加速器：
 ```bash
 cat > /etc/docker/daemon.json <<'EOF'
 {
-  "registry-mirrors": ["https://docker.m.daocloud.io"]
+  "registry-mirrors": ["https://docker.1panel.live"]
 }
 EOF
 systemctl restart docker
