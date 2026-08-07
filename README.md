@@ -23,7 +23,10 @@ Docker Hub 直连易断，先配置镜像加速器：
 ```bash
 cat > /etc/docker/daemon.json <<'EOF'
 {
-  "registry-mirrors": ["https://docker.1panel.live"]
+  "registry-mirrors": [
+    "https://docker.1panel.live",
+    "https://dockerproxy.link"
+  ]
 }
 EOF
 systemctl restart docker
