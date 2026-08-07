@@ -4,6 +4,11 @@
 
 > 仅发布编译后的二进制与 Docker 镜像，不含源码
 
+## 界面预览
+
+<img src="https://gcore.jsdelivr.net/gh/lhz03/img@a6b6ebbd5da5a9fb82956755e6957bc1dea4f752/2026/08/08/28e846c90438098b49b69659491a371e.png" width="48%" alt="羽化面板界面预览1">
+<img src="https://gcore.jsdelivr.net/gh/lhz03/img@fe81f9d93efcf4676adbb514665d79466c23063a/2026/08/08/2e42a555e5613acf7702c3065ba93404.png" width="48%" alt="羽化面板界面预览2">
+
 ## 快速开始
 
 | 方式 | 平台 | 说明 |
