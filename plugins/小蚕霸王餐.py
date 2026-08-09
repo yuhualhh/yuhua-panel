@@ -7,7 +7,7 @@
 # [public: true]
 # [priority: 9999999999999999999]
 # [version: 11.2.3]
-# [author: yuhualhh]
+# [author: 羽化]
 # [description: ❶小蚕霸王餐内置任务插件，可实现新返现活动推送以及自动抢单、瓜分红包雨、短信验证过火爆、完成每日任务并抽奖、领取累计抽奖奖励、自定义并发、配置代理、微信扫码登录、查询、授权、管理、破上限提现微信、检测授权过期以及CK失效并推送等功能<br>❷部分功能的实现需自行添加计划任务伪装管理员定时，了解如何添加计划任务请看移动云盘插件介绍，关于指令『小蚕检测』与『小蚕清理』定时『30 18 * * *』，关于指令『小蚕一键监控』定时『0 */10 * * * *』，关于指令『小蚕一键红包雨』建议定时『0 59 7,9,11,13,15,18 * * *』，关于指令『小蚕一键运行』定时『0 8,20 * * *』<img src="https://gcore.jsdelivr.net/gh/lhz03/img@f054476821a50f66328fa8271886fab6f8b50964/2025/05/01/9ac4e3c4f46248746e9d0c7a353f38f9.png">]
 # [param: {"required":true,"key":"yuhua_xcbwc.share","bool":false,"placeholder":"","name":"推广码子","desc":"小蚕推广码直链"}]
 # [param: {"required":true,"key":"yuhua_xcbwc.zsm","bool":false,"placeholder":"","name":"收款方式","desc":"微信Bot收款码直链"}]
