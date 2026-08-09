@@ -15,7 +15,7 @@
 # [admin: false]
 # [author: yuhualhh]
 # [service: 2550306191]
-# [description: ❶该插件可为任意插件源的Python、NodeJS插件提供支付接管与积分卡密系统服务。使内置微信支付被支付宝商家账单免挂或易支付或积分抵扣所接管，同时兼容V1接口(MD5签名方式)各大码支付平台<br>❷先发指令『开启支付接管』待提示已开启，再发指令『管理支付接管』添加需启用支付接管的插件。如需暂时关闭则发指令『关闭支付接管』<img src="https://gcore.jsdelivr.net/gh/lhz03/img@29949cd67168912e9b439d29d52a1a509fc70be2/2026/03/28/72bbaadb24ca85e3afb59b270e448cdd.png">]
+# [description: ❶该插件可为任意插件源的Python、NodeJS插件提供支付接管与积分卡密系统服务。将插件原本调用的微信收款，统一接管为支付宝商家账单免挂、易支付或积分抵扣支付，同时兼容V1接口(MD5签名方式)各大码支付平台<br>❷先发指令『开启支付接管』待提示已开启，再发指令『管理支付接管』添加需启用支付接管的插件。如需暂时关闭则发指令『关闭支付接管』<img src="https://gcore.jsdelivr.net/gh/lhz03/img@29949cd67168912e9b439d29d52a1a509fc70be2/2026/03/28/72bbaadb24ca85e3afb59b270e448cdd.png">]
 import middleware,requests,re,os,importlib,json,threading,shutil,time,random,sys
 from datetime import datetime
 from requests.exceptions import ConnectionError, Timeout
