@@ -5,7 +5,7 @@
 # [disable:false]
 # [public: true]
 # [platform: qq,qb,wx,gw,sb,wb,tg,tb]
-# [author: yuhualhh]
+# [author: 羽化]
 # [open_source: false]
 # [priority: 9999999999999999999]
 # [version: 1.1.1]
