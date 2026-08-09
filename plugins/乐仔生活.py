@@ -9,7 +9,7 @@
 # [public: true]
 # [version: 1.1.3]
 # [price: 0]
-# [author: yuhualhh]
+# [author: 羽化]
 # [service: ]
 # [description: ❶乐仔生活内置任务插件，自动完成每日任务获取346左右积分，支持Token登录、手机号登录、自定义并发、管理、查询、授权、检测授权过期以及Token失效推送等功能<br>❷部分功能的实现需自行添加计划任务伪装管理员定时，了解如何添加计划任务请看移动云盘插件介绍，关于指令『乐仔检测』与『乐仔清理』定时『30 18 * * *』，关于指令『乐仔一键运行』定时『0 4,16 * * *』<img src="https://gcore.jsdelivr.net/gh/lhz03/img@bd8210bc5df21199ccd7228aa6246390ff0ebe5a/2026/01/30/72f1808271bcf657c196256a7e2c3fb1.png">]
 
