@@ -11,7 +11,7 @@
 # [version: 2.3.3]
 # [price: 0]
 # [admin: false]
-# [author: yuhualhh]
+# [author: 羽化]
 # [description: ❶顺丰速运插件，支持 顺丰代付、验证码登录、微信扫码登录、查询、管理、授权、检测授权过期以及CK失效推送等功能<br>❷已解决登录凭证失效过快问题<br>❸部分功能的实现需自行添加计划任务伪装管理员定时，了解如何添加计划任务请看移动云盘插件介绍，关于指令『顺丰清理』与『顺丰检测』定时『30 18 * * *』<br>❹请把插件触发规则全部替换成^(顺丰)(登录|查询|管理|清理|检测|授权|代付)$<img src="https://gcore.jsdelivr.net/gh/lhz03/img@ce6b6dde1faa7c1f0d2ca461759dcfc4f26f8164/2026/03/31/dd1b294bd43546a59c9b0e932a6a8f59.png">]
 import re
 from datetime import datetime, timedelta
