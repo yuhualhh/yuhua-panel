@@ -9,7 +9,7 @@
 # [public: true]
 # [version: 3.3.3]
 # [price: 6666.66]
-# [author: yuhualhh]
+# [author: 羽化]
 # [service: ]
 # [description: ❶小米钱包内置任务插件，完成浏览组任务、拉新任务、2天拉新任务以及首次访问活动获取会员时长。支持短信登录、账密登录、扫码登录、黑号清理推送、定时抢兑、自定义并发、CK静默续期、查询、管理、授权、检测授权过期以及CK失效推送等功能<br>❷部分功能的实现需自行添加计划任务伪装管理员定时，了解如何添加计划任务请看移动云盘插件介绍，关于指令『米包检测』与『米包清理』定时『30 18 * * *』，关于指令『米包一键运行』定时『0 8,20 * * *』，关于指令『米包一键抢兑』定时『57 23,9 * * *』<img src="https://gcore.jsdelivr.net/gh/lhz03/img@b4ba469f8e936494ea135a11f6103c9375eae783/2025/10/21/1ced24729474ae46348e41768234d0d3.png">]
 # [param: {"required":true,"key":"yuhua_xmqb.zsm","bool":false,"placeholder":"","name":"收款码子","desc":"微信Bot收款码直链"}]
