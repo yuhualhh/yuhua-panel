@@ -9,7 +9,7 @@
 # [public: true]
 # [admin: true]
 # [version: 1.0.0]
-# [author: yuhualhh]
+# [author: 羽化]
 # [price: 0]
 # [service: ]
 # [description: ❶这是一个用于迁移奥特曼插件数据的插件，默认导出羽化系列插件数据，可通过自定义正则导出任意数据桶进行迁移<br>❷使用本插件需授予一定权限，前往"系统管理-插件权限"全部启用<img src="https://gcore.jsdelivr.net/gh/lhz03/img@6f32560e6260ca49eb0250c004027d73dcbb8383/2026/08/05/b687467c06e968c9e537230018b3c5de.png">]
