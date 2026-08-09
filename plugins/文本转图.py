@@ -13,7 +13,7 @@
 # [version: 1.0.4]
 # [price: 0]
 # [admin: false]
-# [author: yuhualhh]
+# [author: 羽化]
 # [service: 2550306191]
 # [description: ❶该插件可为消息规则的问答回复以及任意插件源的Python、NodeJS插件提供文本转图服务。使其文本内容替换成图片输出，可有效降低各大社交平台文本检测封禁风险。<br>❷先送指令『开启文本转图』待提示已开启，再发指令『管理文本转图』添加需启用文本转图的插件。如需暂时关闭则发指令『关闭文本转图』<img src="https://gcore.jsdelivr.net/gh/lhz03/img@29949cd67168912e9b439d29d52a1a509fc70be2/2026/03/28/72bbaadb24ca85e3afb59b270e448cdd.png">]
 
