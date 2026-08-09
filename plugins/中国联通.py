@@ -9,7 +9,7 @@
 # [public:true]
 # [version: 1.1.0]
 # [price: 0]
-# [author: yuhualhh]
+# [author: 羽化]
 # [service: ]
 # [description: ❶中国联通资产查询以及对接青龙面板代挂插件，适配妖火论坛联通整合本，支持 Token登录、联通账密登录、联通短信登录、管理、查询、授权、检测授权过期以及CK失效推送等功能<br>❷部分功能的实现需自行添加计划任务伪装管理员定时，了解如何添加计划任务请看移动云盘插件介绍，关于指令『联通检测』与『联通清理』定时『30 18 * * *』<img src="https://gcore.jsdelivr.net/gh/lhz03/img@1dab556e9d04a77d6b15802655355fd7be26fa9a/2026/01/21/2157c0cf735b321263a710cf978f43b0.png">]
 
