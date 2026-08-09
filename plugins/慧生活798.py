@@ -9,7 +9,7 @@
 # [public: true]
 # [version: 1.1.3]
 # [price: 0]
-# [author: yuhualhh]
+# [author: 羽化]
 # [service: ]
 # [description: ❶慧生活798内置任务插件，自动完成每日任务获取315左右积分，支持Token登录、手机号登录、自定义并发、管理、查询、授权、检测授权过期以及Token失效推送等功能<br>❷部分功能的实现需自行添加计划任务伪装管理员定时，了解如何添加计划任务请看移动云盘插件介绍，关于指令『慧生活检测』与『慧生活清理』定时『30 18 * * *』，关于指令『慧生活一键运行』定时『0 7,19 * * *』<img src="https://gcore.jsdelivr.net/gh/lhz03/img@7b9ff2cf7c406da88575a68400cff2d4604ddaca/2026/04/08/ab67377a6deec9c1303a10353b9d7666.png">]
 
