@@ -1,6 +1,6 @@
 # 羽化面板 (yuhua-panel)
 
-基于 [sillyGirl](https://github.com/smallfawn/sillyGirl) 的聊天机器人面板，完美适配兼容 AutMan 插件生态，无需改动插件直接放入即用，支持 QQ / 微信多ClawBot / 千寻微信Pro / 企业微信 AI Bot / Telegram / 钉钉 / QQ官方频道 / Web Bot 多平台接入
+基于 [sillyGirl](https://github.com/smallfawn/sillyGirl) 的聊天机器人面板，基本兼容 AutMan 插件生态，无需改动插件直接放入即用，支持 QQ / 微信多ClawBot / 千寻微信Pro / 企业微信 AI Bot / Telegram / 钉钉 / QQ官方频道 / Web Bot 多平台接入
 
 推荐安装官方`支付接管`插件，该可为任意插件源的Python、NodeJS插件提供支付接管与积分卡密系统服务。将插件原本调用的微信收款，统一接管为支付宝商家账单免挂、易支付或积分抵扣支付，同时兼容V1接口(MD5签名方式)各大码支付平台
 
