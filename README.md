@@ -8,7 +8,9 @@
 
 ## 界面预览
 
-<img src="https://gcore.jsdelivr.net/gh/lhz03/img@b8a9b4f45dc45b191b4ee0f54386fcc24c86df9d/2026/08/10/fc38897628069e61c3f11dabfec896c6.png" width="50%" alt="羽化面板界面预览1">
+<img src="https://gcore.jsdelivr.net/gh/lhz03/img@de716e632f4dbe8b756c97bb0b773dfc09a2b214/2026/08/11/55fb7d07dff2de9fecad7e3bea76c04d.png" width="50%" alt="羽化面板界面预览1">
+
+<img src="https://gcore.jsdelivr.net/gh/lhz03/img@5bcb0526c07328887e09a67868ba35990368f220/2026/08/11/fad4c89281d1e4809f68c971639e2b0a.png" width="50%" alt="羽化面板界面预览2">
 
 ## 快速开始
 
