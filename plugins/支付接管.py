@@ -10,7 +10,7 @@
 # [public: true]
 # [open_source: false]
 # [class: 工具类]
-# [version: 1.0.5]
+# [version: 1.0.6]
 # [price: 0]
 # [admin: false]
 # [author: 羽化]
@@ -1745,6 +1745,8 @@ def handle_plugin_management(sender: middleware.Sender, title: str, bucket_name:
                     if not (k.endswith('.js') or k.endswith('.py')):
                         continue
                     name = os.path.splitext(k)[0]
+                    if '@' in name:
+                        name = name.split('@', 1)[1].strip()
                     if name:
                         plugin_names.add(name)
             try:
