@@ -1,6 +1,6 @@
 # 羽化面板 (yuhua-panel)
 
-基于 [sillyGirl](https://github.com/smallfawn/sillyGirl) 的聊天机器人面板，基本兼容 AutMan 插件生态，无需改动插件直接放入即用，支持 QQ / 微信多ClawBot / 千寻微信Pro / 企业微信 AI Bot / Telegram / 钉钉 / QQ官方频道 / Web Bot 多平台接入
+基于 [sillyGirl](https://github.com/smallfawn/sillyGirl) 的聊天机器人面板，基本兼容 AutMan 插件生态，无需改动插件直接放入即用，支持 QQ / QQ官方机器人 / 微信ClawBot / 千寻微信Pro / 企业微信AiBot / Telegram / 钉钉 / Web Bot 多平台接入
 
 推荐安装官方`支付接管`插件，可为任意插件源的Python、NodeJS插件提供支付接管与积分卡密系统服务。将插件原本调用的微信收款，统一接管为支付宝商家账单免挂、易支付或积分抵扣支付，同时兼容V1接口(MD5签名方式)各大码支付平台
 
@@ -109,13 +109,13 @@ chmod +x yuhua-panel
 
 ## 接入适配器
 
-- **QQ**：OneBot 反向 WebSocket，接入地址 `ws://<你的地址>:6060/qq/receive`（NapCat / LLBot / go-cqhttp 兼容）
-- **微信 ClawBot**：用户发「微信龙虾登录」扫码接入聊天，管理员可发「微信龙虾管理」进行管理
-- **千寻Pro**：PC 微信 hook 框架，在「框架设置-HTTP API服务端」页勾选「启用HTTPAPI、框架启动后自动开启HTTPAPI 」以及默认千寻监听接口7777，HTTP事件回调地址填 `http://<你的地址>:6060/qx/webhook`（可选 `webhook_key` 鉴权）；支持文本/图片/视频收发、好友自动同意、收款事件（10007/10015）
-- **企业微信**：[点击查看配置教程](https://gcore.jsdelivr.net/gh/lhz03/img@b439d7ee31969c2102c08eba5f671e8fcb6f853f/2026/08/07/52d772bf84a495061e1ecf74c2347ba3.png)，企业微信群聊需@私聊不用，支持文本收发、markdown 图文/视频链接、进会话欢迎语
+- **QQ**：OneBot 反向 WebSocket，接入地址 `ws://<你的地址>:6060/qq/receive`（NapCat / LLBot 兼容）
+- **QQ官方机器人**：[点击查看配置教程](https://docs.astrbot.app/platform/qqofficial/websockets.html)，支持 WebSocket / Webhook 双模式
+- **微信ClawBot**：用户发「微信龙虾登录」扫码接入聊天，管理员可发「微信龙虾管理」进行管理
+- **千寻微信Pro**：PC 微信 hook 框架，在「框架设置-HTTP API服务端」页勾选「启用HTTPAPI、框架启动后自动开启HTTPAPI 」以及默认千寻监听接口7777，HTTP事件回调地址填 `http://<你的地址>:6060/qx/webhook`（可选 `webhook_key` 鉴权）；支持文本/图片/视频收发、好友自动同意、收款事件（10007/10015）
+- **企业微信AiBot**：[点击查看配置教程](https://gcore.jsdelivr.net/gh/lhz03/img@b439d7ee31969c2102c08eba5f671e8fcb6f853f/2026/08/07/52d772bf84a495061e1ecf74c2347ba3.png)，企业微信群聊需@私聊不用
 - **Telegram**：面板配置 Bot Token
 - **钉钉**：面板配置钉钉 Stream 接入
-- **QQ官方频道**：面板配置，支持 WebSocket / Webhook 双模式
 - **Web**：内置轮询机器人，面板配置
 - **扩展**：当用户使用`Web`或`微信ClawBot`等任意平台进行对话聊天时，可发指令`推送管理`配置收信邮箱，用于接收某些内置任务插件的自动运行结果推送。建议用户设置QQ邮箱，然后在QQ或微信搜索启用`QQ邮箱提醒`功能，管理员需提前在后台系统设置配置邮件服务
 
