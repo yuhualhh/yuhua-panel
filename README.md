@@ -110,14 +110,14 @@ chmod +x yuhua-panel
 ## 接入适配器
 
 - **QQ**：OneBot 反向 WebSocket，接入地址 `ws://<你的地址>:6060/qq/receive`（NapCat / LLBot 兼容）
-- **QQ官方机器人**：[点击查看配置教程](https://docs.astrbot.app/platform/qqofficial/websockets.html)，支持 WebSocket / Webhook 双模式
+- **QQ官方机器人**：[点击查看配置教程](https://docs.astrbot.app/platform/qqofficial/websockets.html)，支持 WebSocket / Webhook 双模式，建议用户发指令`关联QQ`设置后开启映射功能，可同步使用该QQ对应的插件授权数据
 - **微信ClawBot**：用户发「微信龙虾登录」扫码接入聊天，管理员可发「微信龙虾管理」进行管理
 - **千寻微信Pro**：PC 微信 hook 框架，在「框架设置-HTTP API服务端」页勾选「启用HTTPAPI、框架启动后自动开启HTTPAPI 」以及默认千寻监听接口7777，HTTP事件回调地址填 `http://<你的地址>:6060/qx/webhook`（可选 `webhook_key` 鉴权）；支持文本/图片/视频收发、好友自动同意、收款事件（10007/10015）
 - **企业微信AiBot**：[点击查看配置教程](https://gcore.jsdelivr.net/gh/lhz03/img@b439d7ee31969c2102c08eba5f671e8fcb6f853f/2026/08/07/52d772bf84a495061e1ecf74c2347ba3.png)，企业微信群聊需@私聊不用
 - **Telegram**：面板配置 Bot Token
 - **钉钉**：面板配置钉钉 Stream 接入
 - **Web**：内置轮询机器人，面板配置
-- **扩展**：当用户使用`Web`或`微信ClawBot`等任意平台进行对话聊天时，可发指令`推送管理`配置收信邮箱，用于接收某些内置任务插件的自动运行结果推送。建议用户设置QQ邮箱，然后在QQ或微信搜索启用`QQ邮箱提醒`功能，管理员需提前在后台系统设置配置邮件服务
+- **扩展**：当用户使用`Web`或`微信ClawBot`等任意平台进行对话聊天时，可发指令`推送管理`配置收信邮箱，用于接收某些内置任务插件的自动运行结果推送。建议用户设置QQ邮箱，然后在QQ或微信搜索启用`QQ邮箱提醒`功能
 
 ## 数据
 
