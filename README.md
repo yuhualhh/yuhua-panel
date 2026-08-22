@@ -4,8 +4,6 @@
 
 推荐安装官方`支付接管`插件，可为任意插件源的Python、NodeJS插件提供支付接管与积分卡密系统服务。将插件原本调用的微信收款，统一接管为支付宝商家账单免挂、易支付或积分抵扣支付，同时兼容V1接口(MD5签名方式)各大码支付平台
 
-推荐安装官方`文本转图`插件，可为消息规则的问答回复以及任意插件源的Python、NodeJS插件提供文本转图服务。使其文本内容替换成图片输出，可有效降低各大社交平台文本检测封禁风险
-
 ## 界面预览
 
 <img src="https://gcore.jsdelivr.net/gh/lhz03/img@de716e632f4dbe8b756c97bb0b773dfc09a2b214/2026/08/11/55fb7d07dff2de9fecad7e3bea76c04d.png" width="50%" alt="羽化面板界面预览1">
@@ -104,7 +102,7 @@ chmod +x yuhua-panel
 
 ## 社媒对接
 
-- **QQ**：OneBot 反向 WebSocket，接入地址 `ws://<你的地址>:6060/qq/receive`（ [NapCat](https://napneko.github.io/) / [LLBot](https://luckylillia.com/) 兼容）
+- **QQ**：OneBot 反向 WebSocket，接入地址 `ws://<你的地址>:6060/qq/receive`（ [NapCat](https://napneko.github.io/) / [LLBot](https://luckylillia.com/) / [SnowLuma](https://snowluma.github.io/) 兼容）
 - **QQ官方机器人**：[查看配置教程](https://docs.astrbot.app/platform/qqofficial/websockets.html)，支持 WebSocket / Webhook 双模式，建议用户发指令`关联QQ`设置后开启映射功能，可同步使用该QQ对应的插件授权数据
 - **微信ClawBot**：用户发「微信龙虾登录」扫码接入聊天，管理员可发「微信龙虾管理」进行管理
 - **千寻微信Pro**：[访问官网下载安装启动](https://daenmax.github.io/qxpro-doc/)，在「框架设置-HTTP API服务端」页勾选「启用HTTPAPI、框架启动后自动开启HTTPAPI 」以及默认千寻监听接口7777，HTTP事件回调地址填 `http://<你的地址>:6060/qx/webhook`（可选 `webhook_key` 鉴权）；支持文本/图片/视频收发、好友自动同意、收款事件（10007/10015）
