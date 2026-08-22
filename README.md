@@ -16,9 +16,9 @@
 
 | 方式 | 平台 | 说明 |
 |---|---|---|
-| [Docker](#docker-部署推荐) | Linux | 一条命令部署，自动下载最新版 |
-| [二进制](#二进制部署linux) | Linux | 自配环境 Node 24 + Python 3.12 |
-| [Windows](#windows-部署) | Windows | 自配环境 Node 24 + Python 3.12 |
+| [Docker](#docker部署推荐) | Linux | 一条命令部署，自动下载最新版 |
+| [二进制](#linux二进制部署) | Linux | 自配环境 Node 24 + Python 3.12 |
+| [Windows](#windows部署) | Windows | 自配环境 Node 24 + Python 3.12 |
 
 管理员后台`http://服务器IP:6060/admin`，用户前台`http://服务器IP:6060`
 
