@@ -106,7 +106,7 @@ chmod +x yuhua-panel
 - **QQ官方机器人**：[查看配置教程](https://docs.astrbot.app/platform/qqofficial/websockets.html)，支持 WebSocket / Webhook 双模式，建议用户发指令`关联QQ`设置后开启映射功能，可同步使用该QQ对应的插件授权数据
 - **微信ClawBot**：用户发「微信龙虾登录」扫码接入聊天，管理员可发「微信龙虾管理」进行管理
 - **千寻微信Pro**：[访问官网下载安装启动](https://daenmax.github.io/qxpro-doc/)，在「框架设置-HTTP API服务端」页勾选「启用HTTPAPI、框架启动后自动开启HTTPAPI 」以及默认千寻监听接口7777，HTTP事件回调地址填 `http://<你的地址>:6060/qx/webhook`（可选 `webhook_key` 鉴权）；支持文本/图片/视频收发、好友自动同意、收款事件
-- **鲲鹏微信机器人**：[访问下载所需文件](https://115cdn.com/s/swsm1ti3zga?password=l8c7#)，启动鲲鹏主程序完成账号登录，打开`应用管理`导入`http.kp.dll`插件后启用并设置，开启「外网服务、开关服务」，消息推送填 `http://<你的地址>:6060/kpeng/webhook`；支持文本/图片/视频收发、好友自动同意、收款事件
+- **鲲鹏微信机器人**：[访问下载所需文件](https://115cdn.com/s/swsm1ti3zga?password=l8c7#)，启动鲲鹏主程序完成账号登录，打开`应用管理`导入`http.kp.dll`插件后启用并设置，开启「外网服务、开关服务」，消息推送填 `http://<你的地址>:6060/kpeng/webhook`；支持文本/图片收发、好友自动同意、收款事件
 - **企业微信AiBot**：[查看配置教程](https://gcore.jsdelivr.net/gh/lhz03/img@b439d7ee31969c2102c08eba5f671e8fcb6f853f/2026/08/07/52d772bf84a495061e1ecf74c2347ba3.png)，企业微信群聊需@私聊不用
 - **Telegram**：[查看创建TGBot教程](https://docs.astrbot.app/platform/telegram.html)，国内网络环境需要反代TG，[查看反代TG教程](https://mp.weixin.qq.com/s?__biz=Mzk5MDg4MzkwMw==&mid=2247483787&idx=1&sn=8ed139615fb93e4070fea30d5f5a1c34&chksm=c4e0b44e71a893e03228722a0d81d7ff2ef8470a8932fc7fb09c36ed3e810f223458affe6a84&mpshare=1&scene=1&srcid=0721Bck5S9Z3vl0IGZpu9Xtd&sharer_shareinfo=1731fe9070c841b4ecad2c2a159ccc40&sharer_shareinfo_first=1731fe9070c841b4ecad2c2a159ccc40&poc_token=HP7miGqjO8kWimCdpGq4KKc_UoSq_W4bs0CHjLmM)
 - **钉钉**：[查看手动配置教程](https://docs.astrbot.app/platform/dingtalk.html)，群聊需@私聊不用
