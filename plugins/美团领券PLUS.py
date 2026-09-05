@@ -1,6 +1,6 @@
 # [title: 美团领券PLUS]
 # [icon: https://gcore.jsdelivr.net/gh/lhz03/img@628ca207fcc92493bfdc7b376802df13d290a228/2025/04/18/0227ee80f756be5352c84c94d7f9cdf6.png]
-# [rule: ^美团领券$|^美团刷白$|^美团充分$|^美团查分$|^美团加分$|^美团减分$|^释放支付锁$]
+# [rule: ^美团领券$|^美团充分$|^美团查分$|^美团加分$|^美团减分$|^释放支付锁$]
 # [language: python]
 # [disable:false]
 # [public: true]
@@ -8,14 +8,14 @@
 # [author: 羽化]
 # [open_source: false]
 # [priority: 999999999999999998]
-# [version: 2.1.9]
+# [version: 2.2.0]
 # [price: 0]
 # [service: ]
 # [description: ❶提供美团领券的插件，支持对接易支付平台收款、自定义各领券项目价格、管理员可对用户加扣分<br>❷扫码可查看各项目对应领券详情<img src="https://gcore.jsdelivr.net/gh/lhz03/img@21067eaf2abbb6e545cd04507cbcaba81aa51f66/2025/07/05/a55d418210371f7896545baa970b340a.png">]
 
 
 # [param: {"required":true,"key":"yuhua_meituan.api_key","bool":false,"placeholder":"","name":"API秘钥","desc":"请前往 http://api.oroe.cn 注册获取"}]
-# [param: {"required":true,"key":"yuhua_meituan.prices","bool":false,"placeholder":"-1|0.07|-1","name":"项目价格","desc":"自定义领券项目价格，目前有3个项目，各项目之间用英文符|分隔，当设置-1时表示关闭该项目，未配置价格则默认-1|0.07|-1"}]
+# [param: {"required":true,"key":"yuhua_meituan.prices","bool":false,"placeholder":"0.1|0.07|-1","name":"项目价格","desc":"自定义领券项目价格，目前有3个项目，各项目之间用英文符|分隔，当设置-1时表示关闭该项目"}]
 # [param: {"required":false,"key":"yuhua_meituan.exchange_rate","bool":false,"placeholder":"1","name":"兑换比例","desc":"充值余额换算积分的比例，填1表示1元=1积分，填100表示1元=100积分，默认1"}]
 # [param: {"required":false,"key":"yuhua_meituan.payment_lock_timeout","bool":false,"placeholder":"300","name":"支付超时","desc":"支付锁超时时间，防止支付状态被长期占用，默认300秒"}]
 # [param: {"required":false,"key":"yuhua_meituan.min_recharge_amount","bool":false,"placeholder":"0.01","name":"充值阈值","desc":"自定义最低充值金额，默认0.01元"}]
@@ -405,9 +405,9 @@ def call_meituan_api(cookie, project_type):
         return {"code": -1, "msg": "未配置API系统地址"}
 
     api_endpoints = {
-        1: "meituanvc",
+        1: "meituans",
         2: "meituan259",
-        3: "meituanza"
+        3: "meituansa"
     }
     endpoint = api_endpoints.get(project_type, "meituanza")
     url = f"{api_url.rstrip('/')}/API/{endpoint}.php"
@@ -1413,7 +1413,7 @@ def handle_meituan_coupon(sender, user_id):
     """处理美团领券主流程"""
     config = get_config()
     all_prices = parse_prices(config['prices'])
-    project_names = ["美团大众无门槛", "美团综合类券包", "美团早中晚神券"]
+    project_names = ["美团专享类券包", "美团综合类券包", "美团专属类券包"]
     available_projects = []
     project_map = []
     for i, price in enumerate(all_prices):
@@ -1712,8 +1712,6 @@ def main():
         return
     if message == "美团领券":
         handle_meituan_coupon(sender, user_id)
-    elif message == "美团刷白":
-        handle_whitelist(sender)
     elif message == "美团充分":
         handle_recharge(sender, user_id)
     elif message == "美团查分":
