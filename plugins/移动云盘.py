@@ -7,7 +7,7 @@
 # [platform: qq,qb,wx,gw,sb,wb,tg,tb,qx,xy,ip]
 # [priority: 9999999999999999999]
 # [public: true]
-# [version: 9.4.4]
+# [version: 9.4.5]
 # [price: 0]
 # [author: 羽化]
 # [service: ]
@@ -34,12 +34,58 @@ import random
 import socket
 import sys
 import base64
+import os
+import gzip
+import ast
 scripts = "云盘"
 
 def printf(msg, level='INFO'):
     c = 32 if level in ['INFO', 'DEBUG'] else 33 if level in ['WARN', 'WARNING'] else 31
     sys.stderr.write(f"\033[{c}m[{level}] {str(msg)}\033[0m\n")
     sys.stderr.flush()
+
+
+_LOG_SENSITIVE_KEYS = {
+    'authorization', 'jwttoken', 'jwt_token', 'jwt', 'cookie', 'cookies',
+    'cookietokenkey', 'token', 'password', 'csrf_token', 'smidv2', 'smid',
+}
+
+
+def _redact_log_value(value, depth=0):
+    if depth > 4:
+        return '...'
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if str(key).lower() in _LOG_SENSITIVE_KEYS:
+                result[key] = '<redacted>'
+            else:
+                result[key] = _redact_log_value(item, depth + 1)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_redact_log_value(item, depth + 1) for item in value[:20]]
+    if isinstance(value, str) and len(value) > 200:
+        return value[:200] + f'...<{len(value)} chars>'
+    return value
+
+
+def _redact_log_text(text):
+    text = re.sub(
+        r'(?i)("?(?:authorization|jwt_?token|cookietokenkey|password|token)"?\s*[:=]\s*"?)(?:Basic\s+)?[A-Za-z0-9+/=_\-\.%]+',
+        r'\1<redacted>', str(text))
+    text = re.sub(r'(?i)(Basic\s+)[A-Za-z0-9+/=]+', r'\1<redacted>', text)
+    return text
+
+
+def _debug_dump(value, limit=2000):
+    try:
+        text = json.dumps(_redact_log_value(value), ensure_ascii=False)
+    except Exception:
+        text = str(value)
+    text = _redact_log_text(text)
+    if len(text) > limit:
+        text = text[:limit] + f'...<truncated total {len(text)} chars>'
+    return text
 
 debug_key = middleware.bucketGet('yuhua_ydyp', 'debug_pwd') or ''
 DEBUG = (debug_key == '123456789abcC@')
@@ -109,6 +155,390 @@ def local_now():
     return get_china_time()
 ##########################################################
 
+YDYP_GATEWAY_HOST = 'https://gp.mcloud.139.com'
+YDYP_MARKET_HOST = 'https://m.mcloud.139.com'
+YDYP_SIGN_SECRET = 'sekaMdYYLIZfbCfm'
+YDYP_MARKET_NAME = 'sign_in_3'
+YDYP_AUTH_PATH = '/ycloud/auth-service/auth/tyrzLogin'
+YDYP_TIMESTAMP_PATH = '/ycloud/api/timestamp'
+YDYP_APP_VERSION = '13.2.5.0'
+YDYP_CLIENT_VERSION = '13.2.5'
+YDYP_MARKET_UA = (
+    'Mozilla/5.0 (Linux; Android 13; wv) AppleWebKit/537.36 (KHTML, like Gecko) '
+    'Version/4.0 Chrome/108.0.5359.128 Mobile Safari/537.36 '
+    'MCloudApp/13.2.5 AppLanguage/zh-CN'
+)
+YDYP_ORG = 'FXlyfmWg2AzwbrxDKSv5'
+YDYP_ORG_MD5 = hashlib.md5(YDYP_ORG.encode('utf-8')).hexdigest()
+YDYP_EXCHANGE_MARKET_ID = 'sign_in_3_ex'
+YDYP_REFRESH_AES_KEY = b'2olBaQGYnEKoStYomsd1n7ax'
+YDYP_REFRESH_DEVICE_INFO = (
+    '1|127.0.0.1|1|12.5.4|Xiaomi|23049RAD8C|'
+    '1E58F2CE422EB2234BB8795E316BD44B|02-00-00-00-00-00|android 13'
+)
+
+
+def fetch_gateway_timestamp(session=None, timeout=8):
+    requester = session or requests
+    try:
+        resp = requester.get(YDYP_GATEWAY_HOST + YDYP_TIMESTAMP_PATH, timeout=timeout)
+        data = resp.json()
+        result = data.get('result')
+        if isinstance(result, int) and result > 0:
+            return str(result)
+        if isinstance(result, str) and result.isdigit():
+            return result
+    except Exception:
+        pass
+    return str(int(time.time() * 1000))
+
+
+def build_gateway_sign_headers(session=None, extra=None):
+    request_id = str(uuid.uuid4())
+    timestamp = fetch_gateway_timestamp(session)
+    nonce = str(uuid.uuid4())
+    raw = YDYP_SIGN_SECRET + request_id + timestamp + nonce + '' + YDYP_SIGN_SECRET
+    signature = hashlib.md5(raw.encode('utf-8')).hexdigest()
+    headers = {
+        'Content-Type': 'application/json;charset=UTF-8',
+        'x-request-id': request_id,
+        'x-timestamp': timestamp,
+        'x-nonce': nonce,
+        'x-signature': signature,
+        'X-Requested-With': 'XMLHttpRequest',
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def is_transient_error(msg):
+    text = str(msg or '').lower()
+    markers = ('connection refused', 'timeout', 'timed out', 'bad gateway',
+               'service unavailable', 'server error', '接口无响应',
+               '502', '503', '504', '501', '429', '上游')
+    return any(m in text for m in markers)
+
+
+def _basic_auth_phone(auth_value):
+    try:
+        raw = str(auth_value or '').strip()
+        if raw.lower().startswith('basic '):
+            raw = raw[6:].strip()
+        decoded = base64.b64decode(raw).decode('utf-8', 'ignore')
+        for sep in (':', '|'):
+            parts = decoded.split(sep)
+            if len(parts) >= 2 and re.match(r'^\d{11}$', parts[1].strip()):
+                return parts[1].strip()
+    except Exception:
+        pass
+    return ''
+
+
+def _auth_expire_ms(auth_value):
+    try:
+        raw = str(auth_value or '').strip()
+        if raw.lower().startswith('basic '):
+            raw = raw[6:].strip()
+        decoded = base64.b64decode(raw).decode('utf-8', 'ignore')
+        parts = decoded.split(':', 2)
+        token = parts[2] if len(parts) >= 3 else decoded
+        fields = token.split('|')
+        if len(fields) > 3:
+            value = int(float(fields[3]))
+            if value > 0:
+                return value if value > 1_000_000_000_000 else value * 1000
+    except Exception:
+        pass
+    return 0
+
+
+def _set_token_expire_from_auth(account_id, auth_value):
+    expires_at = _auth_expire_ms(auth_value)
+    if expires_at:
+        try:
+            middleware.bucketSet('yuhua_ydyp_token_expire', account_id, str(expires_at))
+        except Exception:
+            pass
+    return expires_at
+
+
+def _jwt_user_domain_id(token):
+    try:
+        parts = str(token or '').split('.')
+        if len(parts) < 2:
+            return ''
+        payload = parts[1] + '=' * (-len(parts[1]) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload))
+        sub = data.get('sub')
+        if isinstance(sub, str):
+            try:
+                sub = json.loads(sub)
+            except Exception:
+                sub = None
+        if isinstance(sub, dict):
+            return str(sub.get('userDomainId') or '').strip()
+    except Exception:
+        pass
+    return ''
+
+
+def _looks_like_success(ret):
+    if not isinstance(ret, dict):
+        return False
+    code = ret.get('code')
+    if code not in (None, ''):
+        return str(code).strip().lower() in ('0', '0.0', '0000', '000000', '200', 'success', 'ok', 'true')
+    if ret.get('success') is True:
+        return True
+    text = str(ret.get('msg') or ret.get('message') or '').strip().lower()
+    return text in ('success', 'ok', '成功')
+
+
+def _response_message(ret, default='未知错误'):
+    if not isinstance(ret, dict):
+        return default
+    for key in ('msg', 'message', 'resultMsg', 'subMsg', 'sub_msg'):
+        value = ret.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    code = ret.get('code')
+    if code not in (None, ''):
+        return f"{default}(code={code})"
+    return default
+
+
+_QUERY_DEVICE_CACHE = {'device_id': '', 'expires_at': 0}
+
+
+def _get_query_device_id():
+    now = time.time()
+    cached = _QUERY_DEVICE_CACHE.get('device_id') or ''
+    if cached and now < _QUERY_DEVICE_CACHE.get('expires_at', 0):
+        return cached
+    try:
+        ok, result = fetch_device_id()
+    except Exception:
+        ok, result = False, ''
+    if ok and result:
+        device_id = str(result).strip()
+        if not device_id.upper().startswith('B'):
+            device_id = 'B' + device_id
+        _QUERY_DEVICE_CACHE['device_id'] = device_id
+        _QUERY_DEVICE_CACHE['expires_at'] = now + 600
+        return device_id
+    return ''
+
+
+def _device_id_with_prefix(value):
+    value = str(value or '').strip()
+    if not value:
+        return ''
+    return value if value.upper().startswith('B') else 'B' + value
+
+
+def _is_exchange_terminal(message):
+    text = str(message or '')
+    patterns = (
+        '兑换结果待确认', '兑换资格校验未通过', '非目标用户', '已兑完', '已耗尽',
+        '奖品单日已耗尽', '奖品已兑完', '云朵不足', '已兑换', '今日已兑换',
+        '本月已兑换', '已下架', '未登录', '账号未登录', '暂无权限', '账号失效', '账号已失效',
+        '登录失效', '重新登录', '认证为空', 'JWT token 为空', 'Token 无效',
+        '账号被封禁',
+    )
+    return any(pattern in text for pattern in patterns)
+
+
+_SHUMEI_PUBLIC_KEY = (
+    "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC8KHAcHbkCn5rxGgGJE+07tY+pt86D/oZ7sA51FaEBv2jgno2TI9zHJVYKJynmiKpixgwUcv93EfWIrU/p/UCs5Vu+odS3I4UBp3R7IZ1A0W01FkumAHYW2PQpMm8ueQKPLUq/idkpG/9b2JDv/qU+Ks36nbUPwlW4CjdfrV+V9QIDAQAB"
+)
+_SHUMEI_SDK_CONFIG = {'ConfusionInfo': {'appId': {'is_encrypt': 0, 'obfuscated_name': 'appId'},
+                   'data': {'appId': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'a9kbown8', 'obfuscated_name': 'um'},
+                            'box': {'is_encrypt': 0, 'obfuscated_name': 'aw'},
+                            'canvas': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'ultuhs59', 'obfuscated_name': 'iu'},
+                            'clientSize': {'cipher': 'DES', 'is_encrypt': 1, 'key': '7s9eixjh', 'obfuscated_name': 'na'},
+                            'organization': {'cipher': 'DES', 'is_encrypt': 1, 'key': '14e30pp1', 'obfuscated_name': 'nl'},
+                            'os': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'j862vr1f', 'obfuscated_name': 'lz'},
+                            'platform': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'pgutfbo7', 'obfuscated_name': 'lm'},
+                            'plugins': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'x98c92bm', 'obfuscated_name': 'hy'},
+                            'pmf': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'gwvvsmr4', 'obfuscated_name': 'yu'},
+                            'protocol': {'is_encrypt': 0, 'obfuscated_name': 'protocol'},
+                            'referer': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'gka1ljjt', 'obfuscated_name': 'mf'},
+                            'res': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'ht2n6dwf', 'obfuscated_name': 'ut'},
+                            'rtype': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'k2p9ifij', 'obfuscated_name': 'fm'},
+                            'sdkver': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'q4ij0mv5', 'obfuscated_name': 'ir'},
+                            'status': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'moyspi7i', 'obfuscated_name': 'kp'},
+                            'subVersion': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'egsyl21v', 'obfuscated_name': 'dk'},
+                            'svm': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'yf780e9w', 'obfuscated_name': 'ee'},
+                            'time': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'btb17oag', 'obfuscated_name': 'jt'},
+                            'timezone': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'l94h8clc', 'obfuscated_name': 'bl'},
+                            'tn': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'crnw0x7e', 'obfuscated_name': 'as'},
+                            'trees': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'x6the9nq', 'obfuscated_name': 'ij'},
+                            'ua': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'bewicpxu', 'obfuscated_name': 'pu'},
+                            'url': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'llj8yd1x', 'obfuscated_name': 'sb'},
+                            'version': {'is_encrypt': 0, 'obfuscated_name': 'version'},
+                            'vpw': {'cipher': 'DES', 'is_encrypt': 1, 'key': 'f1zlae4b', 'obfuscated_name': 'qb'}},
+                   'organization': {'is_encrypt': 0, 'obfuscated_name': 'organization'},
+                   'os': {'is_encrypt': 0, 'obfuscated_name': 'os'}},
+ 'Protocol': 4}
+_DEVICE_SMID_CACHE = {}
+_DEVICE_ID_CACHE = {'device_id': '', 'smid': '', 'expires_at': 0}
+
+
+def _sdk_number(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _sdk_float_string(value):
+    if value == 0:
+        return '0'
+    text = format(float(value), '.15g')
+    if 'e' in text or 'E' in text:
+        mantissa, exponent = text.lower().split('e')
+        return f"{mantissa}e{int(exponent)}"
+    return text
+
+
+def _sdk_string(value):
+    if value is None:
+        return 'null'
+    number = _sdk_number(value)
+    if number is not None:
+        return _sdk_float_string(number)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, (list, tuple)):
+        return ','.join(_sdk_string(item) for item in value if item is not None)
+    return '[object Object]'
+
+
+def _sdk_checksum(profile):
+    parts = []
+    for key in sorted(profile.keys()):
+        value = profile[key]
+        number = _sdk_number(value)
+        if number is not None:
+            parts.append(_sdk_float_string(number * 10000))
+        else:
+            parts.append(_sdk_string(value))
+    return hashlib.md5(''.join(parts).encode('utf-8')).hexdigest()
+
+
+def _sdk_des(key, text):
+    from Crypto.Cipher import DES
+    units = []
+    for char in str(text):
+        code = ord(char)
+        if code <= 0xFFFF:
+            units.append(code)
+        else:
+            code -= 0x10000
+            units.append(0xD800 + (code >> 10))
+            units.append(0xDC00 + (code & 0x3FF))
+    data = bytearray((len(units) + 7) // 8 * 8)
+    for offset in range(0, len(data), 4):
+        word = 0
+        for index in range(4):
+            if offset + index < len(units):
+                word |= units[offset + index] << (24 - 8 * index)
+        data[offset:offset + 4] = (word & 0xFFFFFFFF).to_bytes(4, 'big')
+    cipher = DES.new(str(key).encode('utf-8'), DES.MODE_ECB)
+    return base64.b64encode(cipher.encrypt(bytes(data))).decode('utf-8')
+
+
+def _sdk_aes(text, key):
+    from Crypto.Cipher import AES
+    data = str(text).encode('utf-8')
+    if len(data) % 16:
+        data += b'\x00' * (16 - len(data) % 16)
+    cipher = AES.new(str(key).encode('utf-8'), AES.MODE_CBC, b'0102030405060708')
+    return cipher.encrypt(data).hex()
+
+
+def _sdk_obfuscate(profile):
+    config = _SHUMEI_SDK_CONFIG['ConfusionInfo']['data']
+    result = {}
+    for name, value in profile.items():
+        field = config.get(name)
+        if not field:
+            result[name] = value
+            continue
+        if field.get('is_encrypt') and value is not None and _sdk_string(value) != '':
+            if field.get('cipher') != 'DES':
+                raise ValueError(f"unsupported SDK cipher {field.get('cipher')}")
+            value = _sdk_des(field['key'], _sdk_string(value))
+        result[field['obfuscated_name']] = value
+    return result
+
+
+def _sdk_data(profile, uid):
+    fields = dict(profile)
+    fields['tn'] = _sdk_checksum(profile)
+    obfuscated = _sdk_obfuscate(fields)
+    payload = json.dumps(obfuscated, ensure_ascii=False, separators=(',', ':'))
+    compressed = bytearray(gzip.compress(payload.encode('utf-8'), compresslevel=6))
+    # pako gzip header: no timestamp, OS=3
+    compressed[4:8] = b'\x00\x00\x00\x00'
+    compressed[9] = 3
+    encoded = base64.b64encode(bytes(compressed)).decode('utf-8')
+    key = hashlib.md5(str(uid).encode('utf-8')).hexdigest()[:16]
+    return _sdk_aes(encoded, key)
+
+
+def _smid(uid):
+    base = (datetime.now(timezone(timedelta(hours=8))).strftime('%Y%m%d%H%M%S')
+            + hashlib.md5(str(uid).encode('utf-8')).hexdigest() + '00')
+    check = hashlib.md5(('smsk_web_' + base).encode('utf-8')).hexdigest()[:14]
+    return base + check + '0'
+
+
+def _rsa_encrypt(plaintext):
+    from Crypto.PublicKey import RSA
+    from Crypto.Cipher import PKCS1_v1_5
+    key = RSA.import_key(base64.b64decode(_SHUMEI_PUBLIC_KEY))
+    cipher = PKCS1_v1_5.new(key)
+    return base64.b64encode(cipher.encrypt(str(plaintext).encode('utf-8'))).decode('utf-8')
+
+
+def _generate_device_profile(ua, page_url):
+    uid = str(uuid.uuid4())
+    started = time.time()
+    ep = _rsa_encrypt(uid)
+    smid = _smid(uid)
+    profile = {
+        'protocol': _SHUMEI_SDK_CONFIG.get('Protocol', 4),
+        'organization': YDYP_ORG,
+        'appId': 'default',
+        'os': 'web',
+        'version': '3.0.0',
+        'sdkver': '3.0.0',
+        'box': '',
+        'rtype': 'all',
+        'smid': smid,
+        'subVersion': '1.0.0',
+        'time': int((time.time() - started) * 1000),
+        'ua': ua,
+        'url': page_url,
+    }
+    data = _sdk_data(profile, uid)
+    payload = json.dumps({
+        'appId': 'default',
+        'organization': YDYP_ORG,
+        'ep': ep,
+        'data': data,
+        'os': 'web',
+        'encode': 5,
+        'compress': 2,
+    }, ensure_ascii=False, separators=(',', ':'))
+    return payload, smid
+
+
 ###################### 移动云盘核心类 (YP) ######################
 class YP:
     """
@@ -128,60 +558,61 @@ class YP:
         self.today_num = 0
         self.timestamp = str(int(round(time.time() * 1000)))
         self.cookies = {'sensors_stay_time': self.timestamp}
-        self.ua = (
-            'Mozilla/5.0 (Linux; Android 16; RMX5060 Build/BP2A.250605.015; wv) '
-            'AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/149.0.7827.13 '
-            'Mobile Safari/537.36 MCloudApp/12.5.4 AppLanguage/zh-CN'
-        )
-        self.session.headers.update({'User-Agent': self.ua})  # 将UA设置到独立的 session 中
+        self.ua = YDYP_MARKET_UA
+        self.session.headers.update({'User-Agent': self.ua})
         parts = cookie_str.split("#")
         self.Authorization = parts[0].strip()
+        phone = str(phone or '').strip()
+        if not re.match(r'^\d{11}$', phone):
+            phone = _basic_auth_phone(self.Authorization) or '未知'
         self.account = phone or "未知"
+        self.market_base_url = YDYP_MARKET_HOST
+        self.market_source_id = '1097'
         self.jwtHeaders = {
             'User-Agent': self.ua,
             'Accept': '*/*',
-            'Host': 'caiyun.feixin.10086.cn:7071',
+            'Host': 'm.mcloud.139.com',
         }
+        self._market_session_ready = False
     
     def close(self):
         """关闭此账号实例的 session"""
         if self.session:
             self.session.close()
 
-    def send_request(self, url, headers=None, data=None, method='GET', cookies=None, retries=3):
+    def send_request(self, url, headers=None, data=None, method='GET', cookies=None, retries=3, delay=None):
         """
         使用此实例的 session 发送请求，并在请求前后增加随机延时
         增加了错误重试机制，确保在超时或异常时及时关闭连接并释放资源。
+        delay=None 时使用默认随机延时；抢兑/滑块等关键请求传 0 以避免整点延迟。
         """
-        time.sleep(random.uniform(0.3, 0.7))
+        if delay is None:
+            delay = random.uniform(0.3, 0.7)
+        if delay > 0:
+            time.sleep(delay)
         for attempt in range(retries):
+            started_at = time.time()
             try:
                 if DEBUG:
                     printf(f"\n===== [REQUEST START] =====", "DEBUG")
                     printf(f"METHOD: {method} | URL: {url}", "DEBUG")
-                    printf(f"HEADERS: {json.dumps(headers or {}, ensure_ascii=False)}", "DEBUG")
+                    printf(f"HEADERS: {_debug_dump(headers or {})}", "DEBUG")
                     if data is not None:
-                        printf(f"BODY(JSON): {json.dumps(data, ensure_ascii=False)}", "DEBUG")
+                        printf(f"BODY(JSON): {_debug_dump(data)}", "DEBUG")
                     if cookies is not None:
-                        try:
-                            printf(f"COOKIES: {json.dumps(cookies, ensure_ascii=False)}", "DEBUG")
-                        except Exception:
-                            printf(f"COOKIES: {str(cookies)}", "DEBUG")
-    
+                        printf(f"COOKIES: {_debug_dump(cookies)}", "DEBUG")
+
                 # 使用实例自身的 self.session
                 with self.session.request(method, url, headers=headers, json=data, cookies=cookies, timeout=15) as response:
+                    response.raise_for_status()
+                    body = response.json()
                     if DEBUG:
                         printf(f"----- [RESPONSE - Attempt {attempt + 1}] -----", "DEBUG")
-                        printf(f"STATUS: {response.status_code}", "DEBUG")
-                        printf(f"RSP HEADERS: {json.dumps(dict(response.headers), ensure_ascii=False)}", "DEBUG")
-                        try:
-                            printf(f"RSP BODY: {json.dumps(response.json(), ensure_ascii=False)}", "DEBUG")
-                        except Exception:
-                            printf(f"RSP BODY: {response.text}", "DEBUG")
+                        printf(f"STATUS: {response.status_code} | ELAPSED: {int((time.time() - started_at) * 1000)}ms", "DEBUG")
+                        printf(f"RSP HEADERS: {_debug_dump(dict(response.headers))}", "DEBUG")
+                        printf(f"RSP BODY: {_debug_dump(body)}", "DEBUG")
                         printf(f"===== [REQUEST END] =====\n", "DEBUG")
-    
-                    response.raise_for_status()
-                    return response.json()
+                    return body
             except (requests.Timeout, requests.RequestException, Exception) as e:
                 if DEBUG:
                     printf(f"⚠️ Attempt {attempt + 1} Failed: {str(e)}", "WARN")
@@ -189,18 +620,109 @@ class YP:
                     time.sleep(1)
                 else:
                     return {"error": f"请求失败: {str(e)}"}
+
+    def build_market_page_url(self, source_id=None, base_url=None):
+        current_source_id = source_id or self.market_source_id
+        base = (base_url or self.market_base_url).rstrip('/')
+        return (f'{base}/portal/mobilecloud/index.html?path=newsignin'
+                f'&sourceid={current_source_id}&enableShare=1'
+                f'&token={urllib.parse.quote(self.token or "", safe="")}&targetSourceId=001005')
+
+    def _exchange_jwt_via_gateway(self, sso_token):
+        payload = {
+            'token': sso_token,
+            'openAccount': 0,
+            'marketName': YDYP_MARKET_NAME,
+            'sourceId': self.market_source_id,
+        }
+        last_err = ''
+        for host in ('m.mcloud.139.com', 'gp.mcloud.139.com'):
+            base = f'https://{host}'
+            extra = {
+                'User-Agent': self.ua,
+                'Host': host,
+                'Origin': 'https://m.mcloud.139.com',
+                'Referer': self.build_market_page_url(),
+                'activityid': YDYP_MARKET_NAME,
+                'appversion': YDYP_APP_VERSION,
+                'X-Requested-With': 'com.chinamobile.mcloud',
+                'Cache-Control': 'no-cache',
+                'showloading': 'true',
+            }
+            for attempt in range(3):
+                headers = build_gateway_sign_headers(self.session, extra)
+                data = self.send_request(
+                    base + YDYP_AUTH_PATH,
+                    headers=headers,
+                    data=payload,
+                    method='POST',
+                    retries=1,
+                )
+                if data and not data.get('error'):
+                    code = data.get('code')
+                    if str(code) == '0':
+                        result = data.get('result') or {}
+                        token = result.get('token') if isinstance(result, dict) else None
+                        if token:
+                            return token, ''
+                        last_err = f'{host}: 响应缺少 token'
+                    else:
+                        msg = data.get('msg') or data.get('message') or f'code={code}'
+                        last_err = f'{host}: {msg}'
+                        if str(code) not in ('404', '501', '502', '503', '504', '-1'):
+                            return None, last_err
+                elif data and data.get('error'):
+                    last_err = f'{host}: {data["error"]}'
+                else:
+                    last_err = f'{host}: 接口无响应'
+                if attempt < 2:
+                    delay = min(2 ** attempt, 4)
+                    printf(f'-网关换取JWT失败({last_err})，{delay}s 后重试', 'WARN')
+                    time.sleep(delay)
+        return None, last_err
+
+    def _exchange_jwt_legacy(self, sso_token):
+        legacy_headers = {
+            'User-Agent': self.ua,
+            'Accept': '*/*',
+            'Host': 'caiyun.feixin.10086.cn:7071',
+        }
+        jwt_url = f"https://caiyun.feixin.10086.cn:7071/portal/auth/tyrzLogin.action?ssoToken={sso_token}"
+        jwt_data = self.send_request(jwt_url, headers=legacy_headers, method='POST', retries=2)
+        if not jwt_data or jwt_data.get('error'):
+            return None, '接口无响应'
+        if jwt_data.get('code') != 0:
+            return None, jwt_data.get('msg', '未知错误')
+        result = jwt_data.get('result') or {}
+        token = result.get('token') if isinstance(result, dict) else None
+        if not token:
+            return None, '响应缺少 token'
+        return token, ''
     
     def sso(self):
-        """刷新令牌，获取新的 ssoToken，区分CK失效与请求失败"""
-        url = 'https://orches.yun.139.com/orchestration/auth-rebuild/token/v1.0/querySpecToken'
-        headers = {
+        common_headers = {
             'Authorization': self.Authorization,
+            'User-Agent': self.ua,
             'Content-Type': 'application/json',
             'Accept': '*/*',
-            'Host': 'orches.yun.139.com'
         }
-        data = {"account": self.account, "toSourceId": "001005"}
-        ret = self.send_request(url, headers=headers, data=data, method='POST')
+        ret = self.send_request(
+            'https://user-njs.yun.139.com/user/querySpecTokenV2',
+            headers={**common_headers, 'Host': 'user-njs.yun.139.com'},
+            data={"toSourceId": "001005"},
+            method='POST',
+            retries=4,
+        )
+        if (not ret) or ret.get("error") or not (
+            ret.get('success') and isinstance(ret.get('data'), dict) and ret['data'].get('token')
+        ):
+            ret = self.send_request(
+                'https://orches.yun.139.com/orchestration/auth-rebuild/token/v1.0/querySpecToken',
+                headers={**common_headers, 'Host': 'orches.yun.139.com'},
+                data={"account": self.account, "toSourceId": "001005"},
+                method='POST',
+                retries=4,
+            )
         if not ret:
             return False, "网络请求失败"
         if ret.get("error"):
@@ -209,7 +731,7 @@ class YP:
                 return False, f"网络请求异常: {error_msg}"
             else:
                 return False, error_msg
-        if ret.get('success'):
+        if ret.get('success') and isinstance(ret.get('data'), dict) and ret['data'].get('token'):
             self.token = ret['data']['token']
             return True, "ok"
         else:
@@ -219,185 +741,421 @@ class YP:
             else:
                 return False, f"请求异常: {message}"
     
+    def _apply_jwt_cookies(self):
+        if not self.jwtToken:
+            return
+        self.cookies['jwtToken'] = self.jwtToken
+        self.cookies['sensors_stay_time'] = str(int(time.time() * 1000))
+        domain_id = _jwt_user_domain_id(self.jwtToken)
+        if domain_id:
+            self.cookies['userDomainId'] = domain_id
+        auth_b64 = self.Authorization[6:].strip() if self.Authorization.lower().startswith('basic ') else self.Authorization
+        if auth_b64:
+            self.cookies['cookieTokenKey'] = urllib.parse.quote(auth_b64, safe='')
+        self.jwtHeaders['jwtToken'] = self.jwtToken
+        self.jwtHeaders['jwttoken'] = self.jwtToken
+        if re.match(r'^\d{11}$', self.account):
+            try:
+
+                middleware.bucketSet('yuhua_ydyp_jwt_by_phone', self.account, self.jwtToken)
+            except Exception:
+                pass
+
     def jwt(self):
-        """通过 ssoToken 获取 jwtToken"""
         if not self.token:
             return False, "无可用 ssoToken"
-        url = f"https://caiyun.feixin.10086.cn:7071/portal/auth/tyrzLogin.action?ssoToken={self.token}"
-        ret = self.send_request(url=url, headers=self.jwtHeaders, method='POST')
-        if not ret:
-            return False, "返回数据为空"
-        if ret.get("error"):
-            return False, ret["error"]
-        if ret.get('code') != 0:
-            return False, ret.get('msg', '获取jwtToken失败')
-        self.jwtToken = ret['result']['token']
-        self.jwtHeaders['jwtToken'] = self.jwtToken
-        self.cookies['jwtToken'] = self.jwtToken
-        return True, "ok"
+        jwt_token, gateway_err = self._exchange_jwt_via_gateway(self.token)
+        if jwt_token:
+            self.jwtToken = jwt_token
+            self._apply_jwt_cookies()
+            return True, "ok"
+
+        jwt_token, legacy_err = self._exchange_jwt_legacy(self.token)
+        if jwt_token:
+            self.jwtToken = jwt_token
+            self._apply_jwt_cookies()
+            return True, "ok"
+        if is_transient_error(gateway_err) or is_transient_error(legacy_err):
+            return False, f"JWT获取失败: 上游服务暂不可用（网关={gateway_err} 旧接口={legacy_err}）"
+        return False, f"JWT获取失败: 网关={gateway_err} 旧接口={legacy_err}"
+
     
-    def receive(self):
-        """查询云朵数量"""
-        url = "https://m.mcloud.139.com/ycloud/signin/page/infoV3?client=app"
+    def _prepare_market_session(self):
+        if getattr(self, '_market_session_ready', False):
+            return
+        self._market_session_ready = True
+        try:
+            page_url = self.build_market_page_url()
+            headers = {
+                'User-Agent': YDYP_MARKET_UA,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Referer': page_url,
+            }
+            with self.session.get(page_url, headers=headers, cookies=self.cookies, timeout=15) as resp:
+                for cookie in self.session.cookies:
+                    if cookie.name and cookie.value:
+                        self.cookies[cookie.name] = cookie.value
+                for cookie in resp.cookies:
+                    if cookie.name and cookie.value:
+                        self.cookies[cookie.name] = cookie.value
+        except Exception:
+            pass
+
+    def _info_v3_once(self, base_url, host):
+        """单端点查询云朵数量，返回 (ok, msg)。"""
+        self._prepare_market_session()
+        url = f"{base_url.rstrip('/')}/ycloud/signin/page/infoV3?client=app"
         headers = {
-            'Host': 'm.mcloud.139.com',
+            'Host': host,
             'Connection': 'keep-alive',
             'sec-ch-ua-platform': '"Android"',
             'Cache-Control': 'no-cache',
-            'sec-ch-ua': '"Android WebView";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
+            'sec-ch-ua': '"Chromium";v="108", "Android WebView";v="108", "Not/A)Brand";v="99"',
             'sec-ch-ua-mobile': '?1',
             'showLoading': 'true',
-            'appVersion': '12.5.4.0',
-            'User-Agent': self.ua,
-            'jwtToken': self.jwtToken,
+            'appVersion': YDYP_APP_VERSION,
+            'User-Agent': YDYP_MARKET_UA,
+            'jwtToken': self.jwtToken or '',
+            'jwttoken': self.jwtToken or '',
             'activityId': 'sign_in_3',
             'Accept': '*/*',
             'X-Requested-With': 'com.chinamobile.mcloud',
             'Sec-Fetch-Site': 'same-origin',
             'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Dest': 'empty',
-            'Referer': 'https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1097&enableShare=1&token=YZsidssolgfdde1e1e1ba1a278ef83975b675337a6&targetSourceId=001005',
+            'Referer': self.build_market_page_url(base_url=f'https://{host}'),
             'Accept-Encoding': 'gzip, deflate, br, zstd',
             'Accept-Language': 'zh,zh-CN;q=0.9,en-US;q=0.8,en;q=0.7'
         }
+        device_id = _get_query_device_id()
+        if device_id:
+            headers['deviceId'] = device_id
         ret = self.send_request(url, headers=headers, cookies=self.cookies)
         if not ret:
             return False, "返回数据为空"
         if ret.get("error"):
             return False, ret["error"]
-        if ret.get('code') == 0 and ret.get('msg') == 'success':
-            self.total_amount = ret.get("result", {}).get("total", 0)
-            self.to_receive = ret.get("result", {}).get("toReceive", 0)
+        if _looks_like_success(ret):
+            result = ret.get("result")
+            if not isinstance(result, dict):
+                return False, "响应缺少 result"
+            self.total_amount = result.get("total", 0) or 0
+            self.to_receive = result.get("toReceive", 0) or 0
             return True, f"当前云朵数量: {self.total_amount}"
+        return False, _response_message(ret, '查询云朵失败')
+
+    def receive(self):
+        """查询云朵数量；m 为主，gp 为兜底。"""
+        errors = []
+        for base_url, host in ((YDYP_MARKET_HOST, 'm.mcloud.139.com'),
+                               (YDYP_GATEWAY_HOST, 'gp.mcloud.139.com')):
+            ok, msg = self._info_v3_once(base_url, host)
+            if ok:
+                return True, msg
+            errors.append(f'{host}: {msg}')
+        return False, "；".join(errors)
+
+    def _prize_log_once(self, base_url, host, api_name):
+        """单端点查询待领奖品，返回 (ok, list 或错误文案)。"""
+        timestamp = str(int(time.time() * 1000))
+        prize_url = (f"{base_url.rstrip('/')}/ycloud/prizeApi/checkPrize/{api_name}"
+                     f"?currPage=1&pageSize=15&_={timestamp}")
+        headers = {
+            'Host': host,
+            'User-Agent': YDYP_MARKET_UA,
+            'Accept': '*/*',
+            'jwtToken': self.jwtToken or '',
+            'jwttoken': self.jwtToken or '',
+            'activityId': 'sign_in_3',
+            'appVersion': YDYP_APP_VERSION,
+            'X-Requested-With': 'com.chinamobile.mcloud',
+            'Referer': self.build_market_page_url(base_url=f'https://{host}'),
+            'showLoading': 'true',
+            'Cache-Control': 'no-cache',
+        }
+        device_id = _get_query_device_id()
+        if device_id:
+            headers['deviceId'] = device_id
+        ret = self.send_request(prize_url, headers=headers, cookies=self.cookies)
+        if not ret:
+            return False, "返回数据为空"
+        if ret.get("error"):
+            return False, ret["error"]
+        if not _looks_like_success(ret):
+            return False, _response_message(ret, '查询待领奖品失败')
+
+        result = ret.get('result')
+        if isinstance(result, dict):
+            records = result.get('result') or result.get('records') or []
+        elif isinstance(result, list):
+            records = result
         else:
-            return False, ret.get('msg', '未知错误')
-    
+            records = []
+
+        pending_prizes = []
+        for value in records:
+            if not isinstance(value, dict):
+                continue
+            prize_name = value.get('prizeName')
+            try:
+                flag = int(value.get('flag', 0))
+            except Exception:
+                flag = 0
+            if flag == 1 and prize_name:  # flag=1表示待领取
+                expire_time = str(value.get('expireTime') or '')
+                if len(expire_time) >= 10:
+                    # 截取前10位日期并将 '-' 替换为 '.' 以符合预期展示
+                    expire_date = expire_time[:10].replace('-', '.')
+                    pending_prizes.append(f"{prize_name},至{expire_date}失效")
+                else:
+                    pending_prizes.append(prize_name)
+        return True, pending_prizes
+
     def get_pending_prizes(self):
-        """获取待领取奖品列表"""
+        """获取待领取奖品列表；V2 优先、V1 兜底，m 主 gp 备。"""
         if not self.jwtToken:
             return False, "无 jwtToken, 无法查询待领奖品"
-        
-        try:
-            timestamp = str(int(time.time() * 1000))
-            prize_url = f"https://caiyun.feixin.10086.cn/market/prizeApi/checkPrize/getUserPrizeLogPage?currPage=1&pageSize=15&_={timestamp}"
-            
-            ret = self.send_request(prize_url, headers=self.jwtHeaders, cookies=self.cookies)
-            if not ret:
-                return False, "返回数据为空"
-            if ret.get("error"):
-                return False, ret["error"]
-            
-            result = ret.get('result', {}).get('result', [])
-            pending_prizes =[]
-            
-            for value in result:
-                prize_name = value.get('prizeName')
-                flag = value.get('flag')
-                if flag == 1 and prize_name:  # flag=1表示待领取
-                    expire_time = value.get('expireTime', '')
-                    if expire_time and len(expire_time) >= 10:
-                        # 截取前10位日期并将 '-' 替换为 '.' 以符合预期展示
-                        expire_date = expire_time[:10].replace('-', '.')
-                        prize_str = f"{prize_name},至{expire_date}失效"
-                    else:
-                        prize_str = prize_name
-                    pending_prizes.append(prize_str)
-            
-            return True, pending_prizes
-            
-        except Exception as e:
-            return False, f"查询待领奖品异常: {str(e)}"
+        errors = []
+        for api_name in ('getUserPrizeLogPageV2', 'getUserPrizeLogPage'):
+            for base_url, host in ((YDYP_MARKET_HOST, 'm.mcloud.139.com'),
+                                   (YDYP_GATEWAY_HOST, 'gp.mcloud.139.com')):
+                try:
+                    ok, result = self._prize_log_once(base_url, host, api_name)
+                except Exception as e:
+                    ok, result = False, f"查询异常: {str(e)}"
+                if ok:
+                    return True, result
+                errors.append(f'{api_name}@{host}: {result}')
+        return False, "；".join(errors)
+
+
+    def _cloud_record_page(self, base_url, host, page_number, page_size):
+        """单端点读取一页云朵记录，返回 (ok, msg, result)。"""
+        url = (f"{base_url.rstrip('/')}/signin/public/cloudRecord"
+               f"?type=1&pageNumber={page_number}&pageSize={page_size}")
+        headers = {
+            'Host': host,
+            'User-Agent': YDYP_MARKET_UA,
+            'Accept': '*/*',
+            'jwtToken': self.jwtToken or '',
+            'jwttoken': self.jwtToken or '',
+            'activityId': 'sign_in_3',
+            'appVersion': YDYP_APP_VERSION,
+            'X-Requested-With': 'com.chinamobile.mcloud',
+            'Referer': self.build_market_page_url(base_url=f'https://{host}'),
+        }
+        device_id = _get_query_device_id()
+        if device_id:
+            headers['deviceId'] = device_id
+        ret = self.send_request(url, headers=headers, cookies=self.cookies, method='GET')
+        if not ret:
+            return False, "接口无响应", None
+        if ret.get("error"):
+            return False, ret["error"], None
+        if not _looks_like_success(ret):
+            return False, _response_message(ret, '获取云朵记录失败'), None
+        result = ret.get("result") if isinstance(ret.get("result"), dict) else {}
+        return True, '', result
 
     def get_today_cloud(self):
-        """统计今日新增云朵数量（支持多页获取）"""
+        """统计今日新增云朵数量（多端点、多页）。"""
         if not self.jwtToken:
             return False, "无 jwtToken, 无法查询今日云朵"
-        
+
         today_str = str(local_now().date())  # 北京时间的今日日期 (YYYY-MM-DD)
-        total = 0
-        page_number = 1
-        page_size = 10  # 增大页面大小，减少请求次数
-        
-        while True:
-            url = f"https://m.mcloud.139.com/ycloud/signin/public/cloudRecord?type=1&pageNumber={page_number}&pageSize={page_size}"
-            headers = {
-                'jwttoken': self.jwtToken,
-                'Accept': '*/*'
-            }
-            ret = self.send_request(url, headers=headers, method='GET')
-            if not ret:
-                return False, "接口无响应"
-            if ret.get("error"):
-                return False, ret["error"]
-            if ret.get('code') != 0:
-                return False, ret.get('msg', '获取失败')
-            
-            result = ret.get("result", {})
-            records = result.get("records", [])
-            
-            # 如果当前页没有记录，说明已经到最后一页了
-            if not records:
-                break
-            
-            # 统计当前页的今日云朵
-            page_today_total = 0
-            has_today_record = False
-            
-            for item in records:
-                insert_time = item.get('inserttime', '')
-                if insert_time:
-                    # 处理 UTC 时间格式 "2025-08-09T20:14:26.000+00:00"
-                    # 这个时间是UTC时间，需要转换为北京时间（UTC+8）才是图片中显示的实际领取时间
+        # 仓库实现使用 caiyun/market 与 mrp/market；m/ycloud 也仍可用，依次兜底。
+        candidates = (
+            (f'{YDYP_MARKET_HOST}/ycloud', 'm.mcloud.139.com'),
+            ('https://caiyun.feixin.10086.cn/market', 'caiyun.feixin.10086.cn'),
+            ('https://mrp.mcloud.139.com/market', 'mrp.mcloud.139.com'),
+        )
+        last_error = ''
+        for base_url, host in candidates:
+            total = 0
+            page_number = 1
+            ok_any = False
+            while page_number <= 10:
+                ok, msg, result = self._cloud_record_page(base_url, host, page_number, 10)
+                if not ok:
+                    last_error = f'{host}: {msg}'
+                    break
+                ok_any = True
+                records = result.get("records", []) if isinstance(result, dict) else []
+                if not records:
+                    break
+
+                page_today_total = 0
+                has_today_record = False
+                reached_older = False
+                for item in records:
+                    if not isinstance(item, dict):
+                        continue
+                    insert_time = str(item.get('inserttime') or '')
+                    if not insert_time:
+                        continue
+                    # inserttime 是 UTC 时间，需要转北京时间再按天统计
                     try:
-                        from datetime import datetime, timezone, timedelta
-                        # 解析UTC时间（格式如："2025-08-09T20:14:26.000+00:00"）
                         if insert_time.endswith('+00:00'):
                             utc_time = datetime.fromisoformat(insert_time)
                         else:
-                            # 如果没有时区信息，假设是UTC时间
                             utc_time = datetime.fromisoformat(insert_time.replace('Z', ''))
                             utc_time = utc_time.replace(tzinfo=timezone.utc)
-                        
-                        # 转换为北京时间（UTC+8）
-                        beijing_tz = timezone(timedelta(hours=8))
-                        beijing_time = utc_time.astimezone(beijing_tz)
-                        day = str(beijing_time.date())
-                    except Exception as e:
-                        # 兜底：直接取前10位（可能不准确但不会崩溃）
+                        day = str(utc_time.astimezone(timezone(timedelta(hours=8))).date())
+                    except Exception:
                         day = insert_time[:10]
-                        print(f"时间解析失败: {insert_time}, 错误: {e}")  # 调试用
-                else:
-                    continue
-                
-                num = item.get('num', 0)
-                if day == today_str and num > 0:
-                    page_today_total += num
-                    has_today_record = True
-                elif day < today_str:
-                    # 如果遇到了今天之前的记录，说明后续页面也不会有今天的记录了
-                    # 因为记录是按时间倒序排列的
+                    try:
+                        num = int(item.get('num', 0) or 0)
+                    except Exception:
+                        num = 0
+                    if day == today_str and num > 0:
+                        page_today_total += num
+                        has_today_record = True
+                    elif day < today_str:
+                        # 记录按时间倒序，遇到今天之前的记录即可停止
+                        reached_older = True
+                        break
+
+                total += page_today_total
+                if reached_older or not has_today_record:
                     break
-            
-            total += page_today_total
-            
-            # 如果当前页没有今天的记录，或者遇到了今天之前的记录，就不需要继续查询了
-            if not has_today_record:
-                break
-            
-            # 检查是否还有下一页
-            current_page = result.get("current", page_number)
-            total_pages = result.get("pages", 1)
-            if current_page >= total_pages:
-                break
-            
-            page_number += 1
-            
-            # 防止无限循环，最多查询10页
-            if page_number > 10:
-                break
-        
-        self.today_num = total
-        return True, f"今日云朵: {total}"
+                current_page = result.get("current", page_number)
+                total_pages = result.get("pages", 1)
+                if current_page >= total_pages:
+                    break
+                page_number += 1
+
+            if ok_any:
+                self.today_num = total
+                return True, f"今日云朵: {total}"
+        return False, last_error or "获取云朵记录失败"
+
+    def _exchange_cookies(self, device_id, extra=None):
+        """构造兑换会话 Cookie：jwtToken/userDomainId/cookieTokenKey/.thumbcache。"""
+        cookies = dict(self.cookies)
+        if self.jwtToken:
+            cookies['jwtToken'] = self.jwtToken
+            domain_id = _jwt_user_domain_id(self.jwtToken)
+            if domain_id:
+                cookies['userDomainId'] = domain_id
+        auth_b64 = self.Authorization[6:].strip() if self.Authorization.lower().startswith('basic ') else self.Authorization
+        if auth_b64:
+            cookies['cookieTokenKey'] = urllib.parse.quote(auth_b64, safe='')
+        device_id = _device_id_with_prefix(device_id)
+        if device_id:
+            thumb_value = device_id[1:] if device_id.startswith('B') else device_id
+            cookies[f'.thumbcache_{YDYP_ORG_MD5}'] = urllib.parse.quote(thumb_value, safe='')
+            smid = _DEVICE_SMID_CACHE.get(device_id) or _DEVICE_SMID_CACHE.get(device_id[1:])
+            if smid:
+                cookies['smidV2'] = smid
+        if extra:
+            cookies.update(extra)
+        return cookies
+
+    def _exchange_headers(self, device_id, extra=None, with_device=True):
+        headers = {
+            'Host': 'm.mcloud.139.com',
+            'Connection': 'keep-alive',
+            'Content-Type': 'application/json;charset=UTF-8',
+            'User-Agent': YDYP_MARKET_UA,
+            'Accept': '*/*',
+            'Origin': 'https://m.mcloud.139.com',
+            'X-Requested-With': 'com.chinamobile.mcloud',
+            'appversion': YDYP_APP_VERSION,
+            'activityid': 'sign_in_3',
+            'jwttoken': self.jwtToken or '',
+            'Referer': self.build_market_page_url(),
+            'Cache-Control': 'no-cache',
+            'showLoading': 'true',
+        }
+        device_id = _device_id_with_prefix(device_id)
+        if device_id:
+            headers['deviceId'] = device_id
+        if with_device:
+            headers['isDeviceId'] = 'true'
+        if extra:
+            headers.update(extra)
+        return headers
+
+    def check_exchange_eligibility(self, prize_id, device_id=''):
+        """兑换前资格预检；返回 (ok, msg)。"""
+        try:
+            pid = int(str(prize_id).strip())
+        except Exception:
+            return False, '商品 prizeId 格式无效'
+        url = (f"{YDYP_MARKET_HOST}/ycloud/signin/page/receivePrizeDetails"
+               f"?marketId={YDYP_EXCHANGE_MARKET_ID}&prizeId={pid}")
+        headers = self._exchange_headers('', with_device=False)
+        ret = self.send_request(url, headers=headers, cookies=self._exchange_cookies(device_id), retries=1, delay=0)
+        if not ret:
+            printf(f"资格预检无响应: prizeId={pid}", 'WARN')
+            return False, '兑换资格校验接口无响应'
+        if ret.get('error'):
+            printf(f"资格预检请求错误: prizeId={pid} err={ret['error']}", 'WARN')
+            return False, ret['error']
+        if not _looks_like_success(ret):
+            message = _response_message(ret, '兑换资格校验失败')
+            printf(f"资格预检失败: prizeId={pid} code={ret.get('code')} msg={message}", 'WARN')
+            return False, message
+        result = ret.get('result') if isinstance(ret.get('result'), dict) else {}
+        if 'exchangeCode' not in result:
+            printf(f"资格预检缺少exchangeCode: prizeId={pid}", 'WARN')
+            return False, '兑换资格响应缺少 exchangeCode'
+        code = str(result.get('exchangeCode') if result.get('exchangeCode') is not None else '').strip()
+        printf(f"资格预检: prizeId={pid} exchangeCode={code}", 'INFO')
+        if code and code != '0':
+            reason = {
+                '2302': '当月兑换第三方奖品数量已达上限，下月再来',
+                '2303': '需开启自动备份且本月成功备份照片才可兑换',
+                '2305': '非目标用户（该奖品有用户范围限制，例如仅限中国移动用户）',
+            }.get(code, '上游未给出具体原因')
+            return False, f"兑换资格校验未通过: exchangeCode={code}（{reason}）"
+        return True, ''
+
+    def exchange_v3(self, prize_id, puzzle_offset, device_id):
+        """提交 exchangeV3；返回 (success, message, terminal)。"""
+        try:
+            pid = int(str(prize_id).strip())
+        except Exception:
+            return False, '商品 prizeId 格式无效', True
+        device_id = _device_id_with_prefix(device_id)
+        if not device_id:
+            return False, '设备标识为空，未提交兑换', True
+        body = {
+            'prizeId': pid,
+            'client': 'app',
+            'clientVersion': YDYP_CLIENT_VERSION,
+            'puzzleOffset': int(puzzle_offset),
+            'smsCode': '',
+            'deviceId': device_id,
+        }
+        url = f"{YDYP_MARKET_HOST}/ycloud/signin/page/exchangeV3"
+        headers = self._exchange_headers(device_id, extra={'isDeviceId': 'true'})
+        cookies = self._exchange_cookies(device_id)
+        # 兑换不做自动重试，避免超时后重复提交；重试由外层显式控制
+        exchange_started = time.time()
+        printf(f"提交exchangeV3: prizeId={pid} offset={puzzle_offset} device={device_id[:12]}...", 'INFO')
+        ret = self.send_request(url, headers=headers, data=body, method='POST', cookies=cookies, retries=1, delay=0)
+        elapsed_ms = int((time.time() - exchange_started) * 1000)
+        if not ret:
+            printf(f"exchangeV3无响应: prizeId={pid} elapsed={elapsed_ms}ms", 'WARN')
+            return False, '兑换接口无响应', False
+        if ret.get('error'):
+            printf(f"exchangeV3请求错误: prizeId={pid} err={ret['error']} elapsed={elapsed_ms}ms", 'WARN')
+            return False, ret['error'], False
+        message = _response_message(ret, '兑换失败')
+        code = ret.get('code')
+        printf(f"exchangeV3回包: prizeId={pid} code={code} msg={str(message)[:160]} elapsed={elapsed_ms}ms", 'INFO')
+        if not _looks_like_success(ret):
+            if '活动太火爆啦' in message or '锁定失败' in message:
+                message += '。'
+            return False, message, _is_exchange_terminal(message)
+        result = ret.get('result') if isinstance(ret.get('result'), dict) else {}
+        oid = result.get('oid') or result.get('oId')
+        returned_prize = str(result.get('prizeId') or '').strip()
+        if not oid or (returned_prize and returned_prize != str(pid)):
+            return False, '兑换结果待确认，请到领奖专区核对（回包缺少奖品记录或商品不一致）', True
+        prize_name = result.get('prizeName') or result.get('name') or ''
+        return True, (f"兑换成功：{prize_name}" if prize_name else '兑换成功'), True
 
 def gen_unique_id(prefix=""):
     timestamp = int(time.time() * 1_000_000)
@@ -631,6 +1389,7 @@ def cookie_login():
             break
     if matched_uid:
         middleware.bucketSet('yuhua_ydyp_token', matched_uid, user_input)
+        _set_token_expire_from_auth(matched_uid, user_input)
         try:
             middleware.bucketDel('yuhua_ydyp_password', matched_uid)
         except Exception:
@@ -638,7 +1397,7 @@ def cookie_login():
         phone = middleware.bucketGet('yuhua_ydyp_phone', matched_uid) or "未知"
         phone_mask = phone[:3] + "****" + phone[-4:] if len(phone) >= 7 else phone
         auth_time = middleware.bucketGet('yuhua_ydyp_auth', matched_uid)
-        if auth_time and auth_time > str(datetime.now().date()):
+        if auth_time and auth_time > str(local_now().date()):
             # 仅在登录/更新CK时同步青龙并启用（CK有效期内）
             if add_to_qinglong(user_input, matched_uid, phone):
                 try:
@@ -672,6 +1431,7 @@ def cookie_login():
         accounts.append(unique_id)
         middleware.bucketSet('yuhua_ydyp_user', userid, str(accounts))
     middleware.bucketSet('yuhua_ydyp_token', unique_id, user_input)
+    _set_token_expire_from_auth(unique_id, user_input)
     middleware.bucketSet('yuhua_ydyp_phone', unique_id, phone)
     phone_mask = phone[:3] + "****" + phone[-4:] if len(phone) >= 7 else phone
     sender.reply(f"""
@@ -702,28 +1462,38 @@ def _query_single_account(unique_id):
     """
     time.sleep(random.uniform(0.5, 1.0))
     phone = middleware.bucketGet('yuhua_ydyp_phone', unique_id) or "未知"
+    if not re.match(r'^\d{11}$', phone):
+        phone = _basic_auth_phone(middleware.bucketGet('yuhua_ydyp_token', unique_id) or '') or phone
     phone_mask = phone[:3] + "****" + phone[-4:] if len(phone) >= 7 else phone
     auth_time = middleware.bucketGet('yuhua_ydyp_auth', unique_id)
-    now_date = datetime.now().date()
-    
+    now_date = local_now().date()
+
     if not auth_time:
         return f"【{phone_mask}】未授权"
-        
-    auth_date = datetime.strptime(auth_time, "%Y-%m-%d").date()
+
+    try:
+        auth_date = datetime.strptime(auth_time, "%Y-%m-%d").date()
+    except ValueError:
+        return f"【{phone_mask}】授权日期异常: {auth_time}"
     if auth_date < now_date:
         return f"【{phone_mask}】授权已过期"
-        
+
     # 接入自动刷新与检查校验体系
     ok_ck, ck_str, ck_msg = check_and_refresh_token(unique_id)
     if not ok_ck and not ck_str:
         return f"【{phone_mask}】{ck_msg}"
-        
+
     yp = YP(ck_str, phone=phone)
     try:
         ok1, msg1 = yp.sso()
         if not ok1:
             msg1_str = str(msg1)
-            need_relogin = any(keyword in msg1_str.lower() for keyword in['unauthorized', 'invalid', 'expired', 'authorization']) or any(keyword in msg1_str for keyword in ['无效', '过期', '失效'])
+            need_relogin = (
+                any(keyword in msg1_str.lower() for keyword in['unauthorized', 'invalid', 'expired', 'authorization'])
+                or any(keyword in msg1_str for keyword in ['无效', '过期', '失效', '未登录', '登录失效'])
+                or '05050006' in msg1_str
+                or '4006' in msg1_str
+            )
             if need_relogin:
                 # 遇到SSO直接拒绝，强制触发底层刷新刷新
                 ok_force, ck_str_force, force_msg = check_and_refresh_token(unique_id, force=True)
@@ -732,33 +1502,36 @@ def _query_single_account(unique_id):
                     yp = YP(ck_str_force, phone=phone)
                     ok1, msg1 = yp.sso()
                     if not ok1:
-                        return f"【{phone_mask}】{msg1}"
+                        return f"【{phone_mask}】SSO失败: {msg1}"
                 else:
                     return f"【{phone_mask}】强制刷新失败: {force_msg}"
             else:
-                return f"【{phone_mask}】{msg1}"
-            
-        ok2, _ = yp.jwt()
+                return f"【{phone_mask}】SSO失败: {msg1}"
+
+        ok2, msg2 = yp.jwt()
         if not ok2:
-            return f"【{phone_mask}】获取jwt失败"
-            
-        ok3, _ = yp.receive()
+            return f"【{phone_mask}】获取jwt失败: {msg2}"
+
+        ok3, msg3 = yp.receive()
         if not ok3:
-            return f"【{phone_mask}】查询云朵出错"
-            
-        ok4, _ = yp.get_today_cloud()
-        today_str = str(yp.today_num) if ok4 else "查询失败"
-        
+            return f"【{phone_mask}】查询云朵出错: {msg3}"
+
+        ok4, msg4 = yp.get_today_cloud()
+        today_str = str(yp.today_num) if ok4 else f"查询失败({msg4})"
+
         # 获取待领奖品
         ok5, prizes_result = yp.get_pending_prizes()
-        if ok5 and prizes_result:
-            if len(prizes_result) == 1:
-                prizes_str = prizes_result[0]
+        if ok5:
+            if prizes_result:
+                if len(prizes_result) == 1:
+                    prizes_str = prizes_result[0]
+                else:
+                    prizes_str = "\n" + "\n".join(prizes_result)
             else:
-                prizes_str = "\n" + "\n".join(prizes_result)
+                prizes_str = "暂无"
         else:
-            prizes_str = "暂无"
-        
+            prizes_str = f"查询失败({prizes_result})"
+
         return f"""
 =====账号信息=====
 🤪 用户账号: {phone_mask}
@@ -1139,7 +1912,7 @@ def clean_expired():
         sender.reply("❌ 需要管理员权限")
         return
     sender.reply("正在清理...")
-    today_str = str(datetime.now().date())
+    today_str = str(local_now().date())
     valid_acc_ids = set()
     all_existing_acc_ids = set()
 
@@ -1212,7 +1985,7 @@ def cron_task():
     """定时任务处理"""
     if imtype == 'fake':
         pass
-    today_str = str(datetime.now().date())
+    today_str = str(local_now().date())
     try:
         users = middleware.bucketAllKeys('yuhua_ydyp_user')
         for user in users:
@@ -1509,14 +2282,14 @@ def auth_specific_user():
 #################### 仅“一键抢兑”受时间限制 ####################
 STOP_EXCHANGE = False
 
-def fetch_device_id():
+def _fetch_device_id_static():
     url = "https://slw.h5cmpassport.com:9090/deviceprofile/v4"
     headers = {
         "Host": "slw.h5cmpassport.com:9090",
         "Connection": "keep-alive",
         "sec-ch-ua-platform": '"Android"',
-        "User-Agent": "Mozilla/5.0 (Linux; Android 16; RMX5060 Build/BP2A.250605.015; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/148.0.7778.49 Mobile Safari/537.36 MCloudApp/12.6.0 AppLanguage/zh-CN",
-        "sec-ch-ua": '"Chromium";v="148", "Android WebView";v="148", "Not/A)Brand";v="99"',
+        "User-Agent": YDYP_MARKET_UA,
+        "sec-ch-ua": '"Chromium";v="108", "Android WebView";v="108", "Not/A)Brand";v="99"',
         "Content-Type": "application/json;charset=UTF-8",
         "sec-ch-ua-mobile": "?1",
         "Accept": "*/*",
@@ -1525,7 +2298,7 @@ def fetch_device_id():
         "Sec-Fetch-Site": "cross-site",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Dest": "empty",
-        "Referer": "https://m.mcloud.139.com/portal/yunClound/index.html?path=National_v12giftPop&sourceid=1003&enableShare=1&token=YZsidssolg06dc47929877172f1cdb7e5d2474d1b7",
+        "Referer": "https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin",
         "Accept-Encoding": "gzip, deflate, br, zstd",
         "Accept-Language": "zh,zh-CN;q=0.9,en-US;q=0.8,en;q=0.7"
     }
@@ -1540,6 +2313,69 @@ def fetch_device_id():
         return False, f"获取deviceId失败: {result}"
     except Exception as e:
         return False, f"获取deviceId异常: {str(e)}"
+
+def _post_device_profile(payload, ua, page_url):
+    """提交数美 deviceprofile/v4，返回 (ok, raw deviceId 或错误)。"""
+    url = "https://slw.h5cmpassport.com:9090/deviceprofile/v4"
+    headers = {
+        "Host": "slw.h5cmpassport.com:9090",
+        "Connection": "keep-alive",
+        "sec-ch-ua-platform": '"Android"',
+        "User-Agent": ua,
+        "sec-ch-ua": '"Chromium";v="108", "Android WebView";v="108", "Not/A)Brand";v="99"',
+        "Content-Type": "application/json;charset=UTF-8",
+        "sec-ch-ua-mobile": "?1",
+        "Accept": "*/*",
+        "Origin": "https://m.mcloud.139.com",
+        "X-Requested-With": "com.chinamobile.mcloud",
+        "Sec-Fetch-Site": "cross-site",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        "Referer": page_url,
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Accept-Language": "zh,zh-CN;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    try:
+        session = get_global_session()
+        resp = session.post(url, headers=headers, data=payload, timeout=15)
+        resp.raise_for_status()
+        result = resp.json()
+        if result.get('code') == 1100 and result.get('detail', {}).get('deviceId'):
+            return True, result['detail']['deviceId']
+        return False, f"获取deviceId失败: {result}"
+    except Exception as e:
+        return False, f"获取deviceId异常: {str(e)}"
+
+
+def fetch_device_id():
+    """优先动态生成数美设备指纹；失败回退静态报文。"""
+    now = time.time()
+    cached = _DEVICE_ID_CACHE.get('device_id') or ''
+    if cached and now < _DEVICE_ID_CACHE.get('expires_at', 0):
+        return True, cached
+
+    page_url = "https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin"
+    dynamic_error = ''
+    try:
+        payload, smid = _generate_device_profile(YDYP_MARKET_UA, page_url)
+        ok, device_id = _post_device_profile(payload, YDYP_MARKET_UA, page_url)
+        if ok:
+            normalized = _device_id_with_prefix(device_id)
+            if normalized:
+                _DEVICE_SMID_CACHE[normalized] = smid
+            _DEVICE_SMID_CACHE[device_id] = smid
+            _DEVICE_ID_CACHE.update(device_id=device_id, smid=smid, expires_at=now + 300)
+            return True, device_id
+        dynamic_error = device_id
+    except Exception as e:
+        dynamic_error = str(e)
+
+    ok, device_id = _fetch_device_id_static()
+    if ok:
+        _DEVICE_ID_CACHE.update(device_id=device_id, smid='', expires_at=now + 300)
+        return True, device_id
+    return False, f"动态设备注册失败: {dynamic_error}；静态设备注册失败: {device_id}"
+
 
 def get_or_fetch_device_id(account_id):
     ok, result = fetch_device_id()
@@ -1556,16 +2392,17 @@ def solve_slide_captcha(yp_obj, dev_id):
     使用 ddddocr 识别偏移距离。
     """
     try:
+        device_id = _device_id_with_prefix(dev_id)
         slide_headers = dict(yp_obj.jwtHeaders)
         slide_headers.update({
             'Host': 'm.mcloud.139.com',
             'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-            'deviceId': 'B' + dev_id if not dev_id.startswith('B') else dev_id,
-            'appVersion': '12.5.4.0',
+            'deviceId': device_id,
+            'appVersion': YDYP_APP_VERSION,
             'activityId': 'sign_in_3',
             'showLoading': 'true',
             'sec-ch-ua-platform': '"Android"',
-            'sec-ch-ua': '"Android WebView";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
+            'sec-ch-ua': '"Chromium";v="108", "Android WebView";v="108", "Not/A)Brand";v="99"',
             'sec-ch-ua-mobile': '?1',
             'Accept': '*/*',
             'Origin': 'https://m.mcloud.139.com',
@@ -1573,53 +2410,72 @@ def solve_slide_captcha(yp_obj, dev_id):
             'Sec-Fetch-Site': 'same-origin',
             'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Dest': 'empty',
-            'Referer': 'https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1097&enableShare=1&token=YZsidssolgfdde1e1e1ba1a278ef83975b675337a6&targetSourceId=001005',
+            'User-Agent': YDYP_MARKET_UA,
+            'Referer': yp_obj.build_market_page_url(),
             'Accept-Encoding': 'gzip, deflate, br, zstd',
             'Accept-Language': 'zh,zh-CN;q=0.9,en-US;q=0.8,en;q=0.7'
         })
-        slide_cookies = dict(yp_obj.cookies)
+        slide_cookies = yp_obj._exchange_cookies(device_id)
 
+        slide_started = time.time()
         resp = yp_obj.send_request(
             "https://m.mcloud.139.com/ycloud/auth-service/slide/getSlide",
             headers=slide_headers,
             cookies=slide_cookies,
-            data={},
-            method='POST'
+            data=None,
+            method='POST',
+            delay=0
         )
 
         if not resp or resp.get("code") != 0:
-            if DEBUG:
-                printf(f"getSlide失败: {resp}", "WARN")
+            printf(f"getSlide失败: code={resp.get('code') if isinstance(resp, dict) else resp} "
+                   f"msg={_response_message(resp, '')} elapsed={int((time.time()-slide_started)*1000)}ms", 'WARN')
             return None
 
         result = resp.get("result", {})
         puzzle_b64 = result.get("puzzle", "")
         picture_b64 = result.get("picture", "")
+        if DEBUG:
+            printf(f"getSlide成功: puzzle={len(puzzle_b64)}B picture={len(picture_b64)}B "
+                   f"elapsed={int((time.time()-slide_started)*1000)}ms", 'DEBUG')
 
         if not puzzle_b64 or not picture_b64:
-            if DEBUG:
-                printf("getSlide响应中缺少图片数据", "WARN")
+            printf("getSlide响应中缺少图片数据，未提交兑换", 'WARN')
             return None
 
-        # 调用 ddddocr 识别滑块偏移
+        printf(f"开始OCR识别滑块: puzzle={len(puzzle_b64)}B picture={len(picture_b64)}B", 'INFO')
+        # 调用 ddddocr 识别滑块偏移；失败返回 None，绝不使用固定偏移兜底
+        ocr_status = None
+        ocr_text = ''
         try:
-            ocr_resp = get_global_session().post(
+            ocr_started = time.time()
+            ocr_resp = requests.post(
                 DDDDOCR_API,
                 json={"slidingImage": puzzle_b64, "backImage": picture_b64, "simpleTarget": True},
                 timeout=15
             )
-            offset = int(float(ocr_resp.json().get("result", 257)))
+            ocr_status = ocr_resp.status_code
+            ocr_text = (ocr_resp.text or '')[:200]
+            ocr_elapsed = int((time.time() - ocr_started) * 1000)
+            offset = int(float(ocr_resp.json().get("result")))
+            try:
+                pic_width = int(float(result.get("picWidth") or 0))
+                puzzle_width = int(float(result.get("puzzleWidth") or 0))
+            except Exception:
+                pic_width, puzzle_width = 0, 0
+            if offset < 0 or (pic_width > 0 and puzzle_width > 0 and offset > pic_width - puzzle_width):
+                printf(f"滑块偏移量超出图片范围: offset={offset} width={pic_width} "
+                       f"puzzle={puzzle_width} ocr={ocr_elapsed}ms", 'WARN')
+                return None
             if DEBUG:
-                printf(f"滑块识别偏移量: {offset}", "DEBUG")
+                printf(f"滑块识别偏移量: {offset} ocr={ocr_elapsed}ms", "DEBUG")
             return offset
         except Exception as e:
-            if DEBUG:
-                printf(f"ddddocr识别失败: {e}, 使用默认偏移257", "WARN")
-            return 257
+            printf(f"ddddocr识别失败: {e} status={ocr_status} body={ocr_text}，未提交兑换", 'WARN')
+            return None
 
     except Exception as e:
-        if DEBUG:
-            printf(f"滑块验证流程异常: {e}", "WARN")
+        printf(f"滑块验证流程异常: {e}，未提交兑换", "WARN")
         return None
 
 def within_exchange_window():
@@ -1646,6 +2502,29 @@ def within_exchange_window():
            (start_20 <= now <= end_20)
 
 
+def _next_exchange_target(now):
+    """返回本次抢兑应等待的整点。
+
+    - 处于某个整点后的 10 分钟窗口内（如 16:06）→ 返回该整点，立即补跑；
+    - 23 点后 → 次日 00:00；
+    - 其余 → 下一个整点（0/10/12/16/20）。
+    """
+    for hour in (0, 10, 12, 16, 20):
+        slot = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if slot <= now <= slot + timedelta(minutes=10):
+            return slot
+    if now.hour >= 23:
+        return (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    targets = [
+        now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        for hour in (0, 10, 12, 16, 20)
+    ]
+    future_targets = [target for target in targets if target > now]
+    if not future_targets:
+        return min(targets)
+    return min(future_targets, key=lambda target: target - now)
+
+
 def handle_yijian_qiangdui():
     global STOP_EXCHANGE
     if not sender.isAdmin():
@@ -1658,21 +2537,7 @@ def handle_yijian_qiangdui():
         sender.reply("❌ 当前时间不在0,10,12,16,20点前后，无法执行云盘抢兑操作")
         return
     now = local_now()
-    possible_targets =[
-        now.replace(hour=0, minute=0, second=0, microsecond=0),
-        now.replace(hour=8, minute=0, second=0, microsecond=0),
-        now.replace(hour=12, minute=0, second=0, microsecond=0),
-        now.replace(hour=16, minute=0, second=0, microsecond=0),
-        now.replace(hour=20, minute=0, second=0, microsecond=0)
-    ]
-    if now.hour >= 23:
-        target_time = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    else:
-        future_targets =[t for t in possible_targets if t > now]
-        if not future_targets:
-            target_time = min(possible_targets)
-        else:
-            target_time = min(future_targets, key=lambda t: t - now)
+    target_time = _next_exchange_target(now)
     prize_bucket_key = 'yuhua_ydyp_prize_regular'
     prize_filter_logic = lambda prize: prize.get('groupId') != 10
     all_keys = middleware.bucketAllKeys(prize_bucket_key)
@@ -1710,7 +2575,7 @@ def handle_yijian_qiangdui():
                 pass
             cleaned_invalid_accounts += 1
             continue
-        if not auth_time or auth_time <= str(datetime.now().date()):
+        if not auth_time or auth_time <= str(local_now().date()):
             fail_reasons.append(f"【{phone_mask}】授权已过期")
             try:
                 middleware.bucketDel(prize_bucket_key, acc_id)
@@ -1748,8 +2613,13 @@ def handle_yijian_qiangdui():
                 continue
         # ---------------------------------
         
-        ok2, _ = y.jwt()
-        if not ok2: fail_reasons.append(f"【{phone_mask}】jwt获取失败"); continue
+        ok2, msg2 = y.jwt()
+        if not ok2: fail_reasons.append(f"【{phone_mask}】jwt获取失败: {msg2}"); continue
+        try:
+            # 预热活动页会话，避免到点后再初始化拖慢首个兑换请求
+            y._prepare_market_session()
+        except Exception:
+            pass
         list_resp = y.send_request("https://m.mcloud.139.com/ycloud/signin/page/exchangeList", headers=y.jwtHeaders, cookies=y.cookies)
         if not list_resp or "result" not in list_resp:
             fail_reasons.append(f"【{phone_mask}】获取奖品列表失败"); continue
@@ -1797,60 +2667,53 @@ def handle_yijian_qiangdui():
     from concurrent.futures import ThreadPoolExecutor, as_completed
     
     def real_exchange(phone_mask, pname, pid, costnum, yobj, user_id, account_id, dev_id):
-        import hashlib
-        import urllib.parse
-        import random
-        
-        target_deviceId = dev_id
-        if not target_deviceId.startswith('B'):
-            target_deviceId = 'B' + target_deviceId
-        thumb_val = target_deviceId[1:]
-        
-        exchange_headers = dict(yobj.jwtHeaders)
-        exchange_headers.update({
-            'Host': 'm.mcloud.139.com',
-            'Connection': 'keep-alive',
-            'sec-ch-ua-platform': '"Android"',
-            'Cache-Control': 'no-cache',
-            'sec-ch-ua': '"Android WebView";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
-            'sec-ch-ua-mobile': '?1',
-            'deviceId': target_deviceId,
-            'showLoading': 'true',
-            'appVersion': '12.5.4.0',
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 16; RMX5060 Build/BP2A.250605.015; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/149.0.7827.13 Safari/537.36 MCloudApp/12.5.4 AppLanguage/zh-CN',
-            'activityId': 'sign_in_3',
-            'Accept': '*/*',
-            'X-Requested-With': 'com.chinamobile.mcloud',
-            'Sec-Fetch-Site': 'same-origin',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Dest': 'empty',
-            'Referer': 'https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1097&enableShare=1&token=YZsidssolgfdde1e1e1ba1a278ef83975b675337a6&targetSourceId=001005',
-            'Accept-Encoding': 'gzip, deflate, br, zstd',
-            'Accept-Language': 'zh,zh-CN;q=0.9,en-US;q=0.8,en;q=0.7'
-        })
-        
-        exchange_cookies = dict(yobj.cookies)
-        # 核心修复点：将手机号转换为小写MD5作为键名，与官方逻辑保持一致
-        account_md5 = hashlib.md5(yobj.account.encode('utf-8')).hexdigest()
-        exchange_cookies[f".thumbcache_{account_md5}"] = urllib.parse.quote(thumb_val)
+        # 确保兑换会话有可用的 SSO/JWT；失败时不提交兑换
+        if not yobj.jwtToken:
+            ok_sso, msg_sso = yobj.sso()
+            if not ok_sso:
+                return (phone_mask, pname, False, f"SSO失败: {msg_sso}", user_id, account_id)
+            ok_jwt, msg_jwt = yobj.jwt()
+            if not ok_jwt:
+                return (phone_mask, pname, False, f"JWT失败: {msg_jwt}", user_id, account_id)
 
+        device_id = _device_id_with_prefix(dev_id)
+        if not device_id:
+            return (phone_mask, pname, False, "设备标识为空", user_id, account_id)
+
+        try:
+            yobj._prepare_market_session()
+        except Exception:
+            pass
+        printf(f"开始兑换 {phone_mask} prize={pname} id={pid} device={device_id[:12]}...", 'INFO')
+        ok_elig, elig_msg = yobj.check_exchange_eligibility(pid, device_id)
+        if not ok_elig:
+            printf(f"兑换被资格预检拦截 {phone_mask}: {elig_msg}", 'WARN')
+            return (phone_mask, pname, False, elig_msg, user_id, account_id)
+
+        last_msg = '兑换失败'
         for attempt in range(1, 6):
             if STOP_EXCHANGE:
                 return (phone_mask, pname, False, "已被手动停止", user_id, account_id)
-            # 每次尝试前获取滑块偏移量
-            puzzle_offset = solve_slide_captcha(yobj, dev_id)
+            # 每次尝试前重新取滑块；失败不提交兑换，也不使用固定偏移兜底
+            puzzle_offset = solve_slide_captcha(yobj, device_id)
             if puzzle_offset is None:
-                puzzle_offset = 257
-            exc_url = f"https://m.mcloud.139.com/ycloud/signin/page/exchangeV2?prizeId={pid}&client=app&clientVersion=12.5.4&puzzleOffset={puzzle_offset}&smsCode="
-            resp = yobj.send_request(exc_url, headers=exchange_headers, cookies=exchange_cookies, method='GET')
-            if resp and resp.get("code") == 0:
-                return (phone_mask, pname, True, f"兑换成功(第{attempt}次)", user_id, account_id)
-            else:
-                if attempt < 5: time.sleep(0.5)
-        msg = resp.get("msg", "兑换失败") if resp else "未知错误"
-        if "活动太火爆啦" in msg or "锁定失败" in msg:
-            msg += "。"
-        return (phone_mask, pname, False, msg, user_id, account_id)
+                last_msg = '滑块识别失败，未提交兑换'
+                printf(f"第{attempt}次兑换未提交 {phone_mask}: 滑块识别失败", 'WARN')
+                if attempt < 5:
+                    time.sleep(0.5)
+                continue
+            ok, msg, terminal = yobj.exchange_v3(pid, puzzle_offset, device_id)
+            if ok:
+                printf(f"兑换成功 {phone_mask} 第{attempt}次: {msg}", 'INFO')
+                return (phone_mask, pname, True, f"兑换成功(第{attempt}次) {msg}", user_id, account_id)
+            last_msg = msg
+            printf(f"兑换失败 {phone_mask} 第{attempt}次: {msg} terminal={terminal}", 'WARN')
+            if terminal:
+                break
+            if attempt < 5:
+                time.sleep(0.5)
+        printf(f"兑换结束 {phone_mask}: {last_msg}", 'WARN')
+        return (phone_mask, pname, False, last_msg, user_id, account_id)
         
     bf_num_local = bingfa
     futures_map = {}
@@ -1953,7 +2816,7 @@ def show_exchange_menu_ydyp(account):
     phone = middleware.bucketGet('yuhua_ydyp_phone', account) or "未知"
     phone_mask = phone[:3] + "****" + phone[-4:] if len(phone) >= 7 else phone
     auth_time = middleware.bucketGet('yuhua_ydyp_auth', account)
-    if not auth_time or auth_time <= str(datetime.now().date()):
+    if not auth_time or auth_time <= str(local_now().date()):
         sender.reply(f"【{phone_mask}】授权已过期，无法进行兑换")
         return
         
@@ -2051,60 +2914,40 @@ def show_exchange_menu_ydyp(account):
             
             sender.reply("正在执行...")
             
-            import hashlib
-            import urllib.parse
-            import random
-            
-            ok_dev, dev_id = get_or_fetch_device_id(account)
+            ok_dev, dev_raw = get_or_fetch_device_id(account)
             if not ok_dev:
-                sender.reply(f"【{phone_mask}】{dev_id}")
+                sender.reply(f"【{phone_mask}】{dev_raw}")
                 return
-                
-            target_deviceId = dev_id
-            if not target_deviceId.startswith('B'):
-                target_deviceId = 'B' + target_deviceId
-            thumb_val = target_deviceId[1:]
-            
-            exchange_headers = dict(yp.jwtHeaders)
-            exchange_headers.update({
-                'Host': 'm.mcloud.139.com',
-                'Connection': 'keep-alive',
-                'sec-ch-ua-platform': '"Android"',
-                'Cache-Control': 'no-cache',
-                'sec-ch-ua': '"Android WebView";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
-                'sec-ch-ua-mobile': '?1',
-                'deviceId': target_deviceId,
-                'showLoading': 'true',
-                'appVersion': '12.5.4.0',
-                'User-Agent': 'Mozilla/5.0 (Linux; Android 16; RMX5060 Build/BP2A.250605.015; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/149.0.7827.13 Safari/537.36 MCloudApp/12.5.4 AppLanguage/zh-CN',
-                'activityId': 'sign_in_3',
-                'Accept': '*/*',
-                'X-Requested-With': 'com.chinamobile.mcloud',
-                'Sec-Fetch-Site': 'same-origin',
-                'Sec-Fetch-Mode': 'cors',
-                'Sec-Fetch-Dest': 'empty',
-                'Referer': 'https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1097&enableShare=1&token=YZsidssolgfdde1e1e1ba1a278ef83975b675337a6&targetSourceId=001005',
-                'Accept-Encoding': 'gzip, deflate, br, zstd',
-                'Accept-Language': 'zh,zh-CN;q=0.9,en-US;q=0.8,en;q=0.7'
-            })
-            
-            exchange_cookies = dict(yp.cookies)
-            account_md5 = hashlib.md5(yp.account.encode('utf-8')).hexdigest()
-            exchange_cookies[f".thumbcache_{account_md5}"] = urllib.parse.quote(thumb_val)
+            device_id = _device_id_with_prefix(dev_raw)
+            if not device_id:
+                sender.reply(f"【{phone_mask}】设备标识为空，未提交兑换")
+                return
 
-            # 获取滑块偏移量
-            puzzle_offset = solve_slide_captcha(yp, dev_id)
+            try:
+                yp._prepare_market_session()
+            except Exception:
+                pass
+            printf(f"手动兑换 {phone_mask} prize={selected_product.get('prizeName')} id={found_pid} device={device_id[:12]}...", 'INFO')
+            ok_elig, elig_msg = yp.check_exchange_eligibility(found_pid, device_id)
+            if not ok_elig:
+                printf(f"手动兑换被资格预检拦截 {phone_mask}: {elig_msg}", 'WARN')
+                sender.reply(f"【{phone_mask}】{elig_msg}")
+                return
+
+            # 获取滑块偏移量；失败不提交兑换，不使用固定偏移兜底
+            sender.reply(f"【{phone_mask}】正在识别滑块...")
+            puzzle_offset = solve_slide_captcha(yp, device_id)
             if puzzle_offset is None:
-                puzzle_offset = 257
-            exc_url = f"https://m.mcloud.139.com/ycloud/signin/page/exchangeV2?prizeId={found_pid}&client=app&clientVersion=12.5.4&puzzleOffset={puzzle_offset}&smsCode="
-            resp = yp.send_request(exc_url, headers=exchange_headers, cookies=exchange_cookies, method='GET')
-            if resp and resp.get("code") == 0:
+                printf(f"手动兑换未提交 {phone_mask}: 滑块识别失败", 'WARN')
+                sender.reply(f"【{phone_mask}】滑块识别失败，未提交兑换")
+                return
+            ok_ex, msg_ex, _terminal = yp.exchange_v3(found_pid, puzzle_offset, device_id)
+            if ok_ex:
+                printf(f"手动兑换成功 {phone_mask}: {msg_ex}", 'INFO')
                 sender.reply(f"【{phone_mask}】兑换【{selected_product.get('prizeName')}】成功")
             else:
-                msg = resp.get("msg", "兑换失败") if resp else "未知错误"
-                if "活动太火爆啦" in msg or "锁定失败" in msg:
-                    msg += "。"
-                sender.reply(f"【{phone_mask}】{msg}")
+                printf(f"手动兑换失败 {phone_mask}: {msg_ex}", 'WARN')
+                sender.reply(f"【{phone_mask}】{msg_ex}")
         except (ValueError, IndexError):
             sender.reply("❌ 无效的选择")
     finally:
@@ -2178,7 +3021,7 @@ def sms_login():
             printf("===== [PHP GET SMS CODE RESPONSE] =====", "DEBUG")
             printf(f"STATUS: {sms_resp.status_code}", "DEBUG")
             printf(f"RSP HEADERS: {json.dumps(dict(sms_resp.headers), ensure_ascii=False)}", "DEBUG")
-            printf(f"RSP BODY: {sms_resp.text}", "DEBUG")
+            printf(f"RSP BODY: {_debug_dump(sms_resp.text)}", "DEBUG")
 
         sms_resp.raise_for_status()
         sms_data = sms_resp.json()
@@ -2219,7 +3062,7 @@ def sms_login():
             printf("===== [PHP LOGIN RESPONSE] =====", "DEBUG")
             printf(f"STATUS: {login_resp.status_code}", "DEBUG")
             printf(f"RSP HEADERS: {json.dumps(dict(login_resp.headers), ensure_ascii=False)}", "DEBUG")
-            printf(f"RSP BODY: {login_resp.text}", "DEBUG")
+            printf(f"RSP BODY: {_debug_dump(login_resp.text)}", "DEBUG")
 
         login_resp.raise_for_status()
         login_data = login_resp.json()
@@ -2274,12 +3117,13 @@ def sms_login():
 
         if matched_uid:
             middleware.bucketSet('yuhua_ydyp_token', matched_uid, user_input)
+            _set_token_expire_from_auth(matched_uid, user_input)
             try:
                 middleware.bucketDel('yuhua_ydyp_password', matched_uid)
             except Exception:
                 pass
             auth_time = middleware.bucketGet('yuhua_ydyp_auth', matched_uid)
-            if auth_time and auth_time > str(datetime.now().date()):
+            if auth_time and auth_time > str(local_now().date()):
                 if add_to_qinglong(user_input, matched_uid, phone):
                     try:
                         ql_envs = get_global_session().get(f"{ql_url}/open/envs", headers={"Authorization": f"Bearer {ql_token}"}, timeout=10)
@@ -2298,6 +3142,7 @@ def sms_login():
                 accounts.append(new_id)
                 middleware.bucketSet('yuhua_ydyp_user', userid, str(accounts))
             middleware.bucketSet('yuhua_ydyp_token', new_id, user_input)
+            _set_token_expire_from_auth(new_id, user_input)
             middleware.bucketSet('yuhua_ydyp_phone', new_id, phone)
             phone_mask = phone[:3] + "****" + phone[-4:]
             sender.reply(f"=====登录成功=====\n🤪 账号: {phone_mask}\n✅ 状态: 添加成功\n------------------\n发送\"{manage_cmd}\"管理账号\n发送\"{query_cmd}\"查询账号")
@@ -2381,7 +3226,7 @@ def password_login():
             printf("===== [PHP PASSWORD LOGIN RESPONSE] =====", "DEBUG")
             printf(f"STATUS: {login_resp.status_code}", "DEBUG")
             printf(f"RSP HEADERS: {json.dumps(dict(login_resp.headers), ensure_ascii=False)}", "DEBUG")
-            printf(f"RSP BODY: {login_resp.text}", "DEBUG")
+            printf(f"RSP BODY: {_debug_dump(login_resp.text)}", "DEBUG")
 
         login_resp.raise_for_status()
         login_data = login_resp.json()
@@ -2435,9 +3280,10 @@ def password_login():
 
         if matched_uid:
             middleware.bucketSet('yuhua_ydyp_token', matched_uid, user_input)
+            _set_token_expire_from_auth(matched_uid, user_input)
             middleware.bucketSet('yuhua_ydyp_password', matched_uid, password)
             auth_time = middleware.bucketGet('yuhua_ydyp_auth', matched_uid)
-            if auth_time and auth_time > str(datetime.now().date()):
+            if auth_time and auth_time > str(local_now().date()):
                 if add_to_qinglong(user_input, matched_uid, phone):
                     try:
                         ql_envs = get_global_session().get(f"{ql_url}/open/envs", headers={"Authorization": f"Bearer {ql_token}"}, timeout=10)
@@ -2456,6 +3302,7 @@ def password_login():
                 accounts.append(new_id)
                 middleware.bucketSet('yuhua_ydyp_user', userid, str(accounts))
             middleware.bucketSet('yuhua_ydyp_token', new_id, user_input)
+            _set_token_expire_from_auth(new_id, user_input)
             middleware.bucketSet('yuhua_ydyp_phone', new_id, phone)
             middleware.bucketSet('yuhua_ydyp_password', new_id, password)
             phone_mask = phone[:3] + "****" + phone[-4:]
@@ -2477,7 +3324,7 @@ except ImportError:
     HAS_CRYPTO = False
 
 def aes_encrypt(data, key):
-    if not HAS_CRYPTO: 
+    if not HAS_CRYPTO:
         return None
     key_bytes = key.encode('utf-8')
     if not isinstance(data, str):
@@ -2486,11 +3333,168 @@ def aes_encrypt(data, key):
     encrypted = cipher.encrypt(pad(data.encode('utf-8'), AES.block_size))
     return base64.b64encode(encrypted).decode('utf-8')
 
-def do_native_token_refresh(account_id, phone, current_auth):
-    """底层原生刷新机制"""
+
+def aes_cbc_encrypt_refresh(plaintext):
+    if not HAS_CRYPTO:
+        return None
+    iv = os.urandom(16)
+    cipher = AES.new(YDYP_REFRESH_AES_KEY, AES.MODE_CBC, iv)
+    encrypted = cipher.encrypt(pad(str(plaintext).encode('utf-8'), AES.block_size))
+    return base64.b64encode(iv + encrypted).decode('utf-8')
+
+
+def aes_cbc_decrypt_refresh(cipher_b64):
+    if not HAS_CRYPTO:
+        return None
+    try:
+        raw = base64.b64decode(str(cipher_b64).strip())
+        if len(raw) < 32 or len(raw) % 16 != 0:
+            return None
+        iv, ciphertext = raw[:16], raw[16:]
+        cipher = AES.new(YDYP_REFRESH_AES_KEY, AES.MODE_CBC, iv)
+        plain = cipher.decrypt(ciphertext)
+        # PKCS7 去填充
+        pad_len = plain[-1] if plain else 0
+        if pad_len < 1 or pad_len > 16 or any(byte != pad_len for byte in plain[-pad_len:]):
+            return None
+        return plain[:-pad_len].decode('utf-8', 'ignore').rstrip('\x00')
+    except Exception:
+        return None
+
+
+def _refresh_user_domain_id(phone):
+    try:
+        jwt_token = middleware.bucketGet('yuhua_ydyp_jwt_by_phone', phone) or ''
+    except Exception:
+        jwt_token = ''
+    return _jwt_user_domain_id(jwt_token)
+
+
+def _find_account_owner(account_id):
+    """从 yuhua_ydyp_user 反查账号所属的机器人用户 ID。"""
+    target = str(account_id)
+    try:
+        users = middleware.bucketAllKeys('yuhua_ydyp_user') or []
+    except Exception:
+        return ''
+    for user in users:
+        try:
+            raw = middleware.bucketGet('yuhua_ydyp_user', user) or '[]'
+            accounts = ast.literal_eval(raw) if isinstance(raw, str) else raw
+        except Exception:
+            continue
+        if not isinstance(accounts, (list, tuple)):
+            continue
+        if any(str(item) == target for item in accounts):
+            return str(user)
+    return ''
+
+
+def _store_refreshed_token(account_id, phone, raw_token, expire_seconds=2592000):
+    """校验新 CK 后落库并同步青龙；返回 (ok, new_ck 或错误)。"""
+    raw_token = str(raw_token or '').strip()
+    if not raw_token:
+        return False, "刷新响应缺少 token"
+    new_auth = 'Basic ' + base64.b64encode(f"mobile:{phone}:{raw_token}".encode('utf-8')).decode('utf-8')
+    new_ck_str = f"{new_auth}#{phone}"
+
+    # 先验证新 CK 能否换到 ssoToken，避免把无效 CK 写回覆盖可用凭据
+    probe = YP(new_ck_str, phone=phone)
+    try:
+        probe_ok, probe_msg = probe.sso()
+    finally:
+        probe.close()
+    if not probe_ok:
+        return False, f"刷新后校验失败: {probe_msg}"
+
+    middleware.bucketSet('yuhua_ydyp_token', account_id, new_ck_str)
+    try:
+        expire_seconds = int(float(expire_seconds))
+        if expire_seconds > 1_000_000_000_000:
+            expire_seconds //= 1000
+        if expire_seconds <= 0:
+            expire_seconds = 2592000
+    except Exception:
+        expire_seconds = 2592000
+    expires_at = int(time.time() * 1000) + expire_seconds * 1000
+    middleware.bucketSet('yuhua_ydyp_token_expire', account_id, str(expires_at))
+    # 续期可能由管理员/计划任务触发；备注用户应写账号所属用户，而不是当前操作者
+    add_to_qinglong(new_ck_str, account_id, phone, target_user=_find_account_owner(account_id) or None)
+    return True, new_ck_str
+
+def _do_native_token_refresh_v2(account_id, phone, current_auth):
+    """13.2.5 新版刷新：AES-CBC(clientType=414) + x-yun-* 头。"""
     if not HAS_CRYPTO:
         return False, "未安装pycryptodome依赖，跳过原生刷新"
-    
+
+    user_domain_id = _refresh_user_domain_id(phone)
+    headers = {
+        'Authorization': current_auth,
+        'Content-Type': 'application/json; charset=UTF-8',
+        'User-Agent': 'okhttp/4.12.0',
+        'x-nettype': '1',
+        'x-deviceinfo': YDYP_REFRESH_DEVICE_INFO,
+        'x-yun-client-info': YDYP_REFRESH_DEVICE_INFO,
+        'x-svctype': '1',
+        'hcy-cool-flag': '1',
+    }
+    if user_domain_id:
+        headers['x-yun-uni'] = user_domain_id
+
+    body = aes_cbc_encrypt_refresh('{"clientType":"414"}')
+    if not body:
+        return False, "加密刷新请求失败"
+
+    try:
+        session = get_global_session()
+        resp = session.post(
+            'https://user-njs.yun.139.com/user/auth/refreshToken',
+            headers=headers,
+            data=body,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        raw = (resp.text or '').strip()
+        if not raw:
+            return False, "刷新响应为空"
+        # 响应可能是 JSON 字符串、{"data":"..."} 或裸 base64
+        try:
+            unwrapped = json.loads(raw)
+            if isinstance(unwrapped, str):
+                raw = unwrapped.strip()
+            elif isinstance(unwrapped, dict):
+                raw = str(unwrapped.get('data') or '').strip()
+        except Exception:
+            pass
+
+        plain = aes_cbc_decrypt_refresh(raw)
+        if plain is None:
+            return False, "解密刷新响应失败"
+        try:
+            payload = json.loads(plain)
+        except Exception:
+            payload = {'success': True, 'data': {'token': plain.strip()}}
+
+        code = str(payload.get('code') or '')
+        if code == '05050006':
+            return False, "凭据已失效，请重新登录"
+        if not _looks_like_success(payload):
+            msg = payload.get('message') or payload.get('msg') or f'code={code}'
+            return False, f"刷新失败: {msg}"
+
+        data = payload.get('data') if isinstance(payload.get('data'), dict) else {}
+        token = data.get('token') or data.get('authToken')
+        expire_seconds = data.get('expireTime') or 2592000
+        return _store_refreshed_token(account_id, phone, token, expire_seconds)
+    except Exception as e:
+        return False, str(e)
+
+
+def _do_native_token_refresh_legacy(account_id, phone, current_auth):
+    """旧版刷新协议（AES-ECB + phoneNumber），保留兜底。"""
+    if not HAS_CRYPTO:
+        return False, "未安装pycryptodome依赖，跳过原生刷新"
+
     url = 'https://user-njs.yun.139.com/user/auth/refreshToken'
     headers = {
         'Content-Type': 'application/json',
@@ -2504,47 +3508,37 @@ def do_native_token_refresh(account_id, phone, current_auth):
         'x-yun-client-info': '||8||||||||||||',
         'hcy-cool-flag': '1',
     }
-    
+
     encrypted_data = aes_encrypt({'phoneNumber': phone}, 'c7lXOigXahPnTViq')
     if not encrypted_data:
         return False, "加密手机号失败"
-        
+
     try:
         session = get_global_session()
         resp = session.post(url, headers=headers, json={'data': encrypted_data}, timeout=15)
         resp.raise_for_status()
         data = resp.json()
         code = str(data.get('code', ''))
-        
+
         if code in ('0', '00', '000', '0000') or data.get('success'):
-            raw_token = data.get('data', {}).get('token')
-            expire_time = data.get('data', {}).get('expireTime')
-            
-            if raw_token:
-                # 重新组装完整的 Authorization
-                new_auth_str = f"mobile:{phone}:{raw_token}"
-                new_auth = f"Basic {base64.b64encode(new_auth_str.encode('utf-8')).decode('utf-8')}"
-                
-                # 更新本地数据库 (Token)
-                new_ck_str = f"{new_auth}#{phone}"
-                middleware.bucketSet('yuhua_ydyp_token', account_id, new_ck_str)
-                
-                # 更新本地数据库 (过期时间戳)
-                try:
-                    expire_seconds = int(float(expire_time))
-                except Exception:
-                    expire_seconds = 2592000
-                expires_at = int(time.time() * 1000) + expire_seconds * 1000
-                middleware.bucketSet('yuhua_ydyp_token_expire', account_id, str(expires_at))
-                
-                # 同步青龙环境变量
-                add_to_qinglong(new_ck_str, account_id, phone)
-                
-                return True, new_ck_str
-                
+            raw_token = (data.get('data') or {}).get('token')
+            expire_time = (data.get('data') or {}).get('expireTime')
+            return _store_refreshed_token(account_id, phone, raw_token, expire_time)
         return False, data.get('message') or data.get('msg') or "未知错误"
     except Exception as e:
         return False, str(e)
+
+
+def do_native_token_refresh(account_id, phone, current_auth):
+    ok, result = _do_native_token_refresh_v2(account_id, phone, current_auth)
+    if ok:
+        return True, result
+    v2_err = result
+
+    ok_legacy, legacy_result = _do_native_token_refresh_legacy(account_id, phone, current_auth)
+    if ok_legacy:
+        return True, legacy_result
+    return False, f"新版刷新失败: {v2_err}；旧版刷新失败: {legacy_result}"
 
 def check_and_refresh_token(account_id, force=False):
     """
@@ -2565,38 +3559,53 @@ def check_and_refresh_token(account_id, force=False):
     if not re.match(r'^\d{11}$', phone):
         # 手机号无效则无法执行原生刷新，直接返回现有CK碰碰运气
         return True, ck_str, "手机号无效，跳过刷新"
-    
+
+    phone_mask = phone[:3] + '****' + phone[-4:] if len(phone) >= 7 else phone
     expire_str = middleware.bucketGet('yuhua_ydyp_token_expire', account_id)
+    if not expire_str:
+        # 旧账号没有 token_expire；尝试从 CK 自带的时间戳补全
+        expire_ms = _set_token_expire_from_auth(account_id, current_auth)
+        expire_str = str(expire_ms) if expire_ms else ''
+        if expire_ms:
+            printf(f"[续期] 账号 {phone_mask} 从CK补全到期时间: {expire_ms}", 'INFO')
     now_ms = int(time.time() * 1000)
-    
+
     need_refresh = force
-    if not need_refresh:
-        if not expire_str:
-            need_refresh = True
-        else:
-            try:
-                expires_at = int(expire_str)
-                # 如果剩余有效期小于 24 小时 (86400000 毫秒)
-                if expires_at - now_ms < 86400000:
-                    need_refresh = True
-            except Exception:
+    if not need_refresh and expire_str:
+        try:
+            expires_at = int(expire_str)
+            # 仅在“已知”剩余有效期小于 24 小时时刷新；缺少过期时间不代表 CK 失效，
+            # 继续使用现有 CK，等 SSO/JWT 明确报失效时再由调用方 force 刷新。
+            if expires_at - now_ms < 86400000:
                 need_refresh = True
-                
+        except Exception:
+            need_refresh = False
+
     if need_refresh:
+        remaining_hours = 0
+        try:
+            remaining_hours = int((int(expire_str) - now_ms) / 3600000) if expire_str else 0
+        except Exception:
+            pass
+        printf(f"[续期] 账号 {phone_mask} 触发CK刷新 force={force} 剩余约{remaining_hours}小时", 'INFO')
         ok, result = do_native_token_refresh(account_id, phone, current_auth)
         if ok:
+            printf(f"[续期] 账号 {phone_mask} 刷新成功", 'INFO')
             return True, result, "原生刷新成功"
         else:
+            printf(f"[续期] 账号 {phone_mask} 刷新失败: {result}", 'WARN')
             # 兜底：如果原生刷新失败（或未安装依赖），尝试使用原有的PHP账密续期
             relogin_ok, relogin_msg = _try_auto_password_relogin(account_id)
             if relogin_ok:
                 new_ck = middleware.bucketGet('yuhua_ydyp_token', account_id)
                 # 为兜底续期设置一个默认的长期有效时间
                 middleware.bucketSet('yuhua_ydyp_token_expire', account_id, str(now_ms + 2592000000))
+                printf(f"[续期] 账号 {phone_mask} 账密兜底刷新成功", 'INFO')
                 return True, new_ck, "账密兜底刷新成功"
             else:
+                printf(f"[续期] 账号 {phone_mask} 账密兜底失败: {relogin_msg}", 'WARN')
                 return False, ck_str, f"刷新失败: {result} / {relogin_msg}"
-                
+
     return True, ck_str, "Token状态良好"
 
 def _try_auto_password_relogin(account_id):
@@ -2646,7 +3655,7 @@ def _try_auto_password_relogin(account_id):
             printf("===== [AUTO PASSWORD RELLOGIN RESPONSE] =====", "DEBUG")
             printf(f"STATUS: {relogin_resp.status_code}", "DEBUG")
             printf(f"RSP HEADERS: {json.dumps(dict(relogin_resp.headers), ensure_ascii=False)}", "DEBUG")
-            printf(f"RSP BODY: {relogin_resp.text}", "DEBUG")
+            printf(f"RSP BODY: {_debug_dump(relogin_resp.text)}", "DEBUG")
 
         relogin_resp.raise_for_status()
         relogin_data = relogin_resp.json()
@@ -2670,9 +3679,10 @@ def _try_auto_password_relogin(account_id):
 
         user_input = f"{ck_value}#{phone}"
         middleware.bucketSet('yuhua_ydyp_token', account_id, user_input)
+        _set_token_expire_from_auth(account_id, user_input)
 
         auth_time = middleware.bucketGet('yuhua_ydyp_auth', account_id)
-        if auth_time and auth_time > str(datetime.now().date()):
+        if auth_time and auth_time > str(local_now().date()):
             if add_to_qinglong(user_input, account_id, phone):
                 try:
                     ql_envs = get_global_session().get(f"{ql_url}/open/envs", headers={"Authorization": f"Bearer {ql_token}"}, timeout=10)
@@ -2843,7 +3853,7 @@ if __name__ == "__main__":
         var_name, ql_config, manage_cmd, query_cmd, login_cmd, price, coin_price, bingfa = get_config()
         ql_url, ql_token = init_qinglong()
         imtype = sender.getImtype()
-        today = str(datetime.now().date())
+        today = str(local_now().date())
         if imtype == 'fake':
             pass
         else:
