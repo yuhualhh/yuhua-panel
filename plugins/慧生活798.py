@@ -1,17 +1,17 @@
 # [title: 慧生活798]
 # [icon: https://gcore.jsdelivr.net/gh/lhz03/img@e421156e71bcb44eae66a85b46e7264b39bf6cee/2026/01/19/afaa1db841593a771653e4791962e75c.png]
 # [language: python]
-# [rule: ^(慧生活)(登录|查询|管理|清理|授权|检测|运行|一键运行)$]
+# [rule: ^(慧生活)(登录|查询|管理|清理|授权|检测|运行|一键运行|设备|设备添加|设备删除)$]
 # [disable:false]
 # [open_source: false]
 # [platform: qq,qb,wx,gw,sb,wb,tg,tb,qx,xy,ip]
 # [priority: 9999999999999999999]
 # [public: true]
-# [version: 1.1.3]
+# [version: 1.2.1]
 # [price: 0]
 # [author: 羽化]
 # [service: ]
-# [description: ❶慧生活798内置任务插件，自动完成每日任务获取315左右积分，支持Token登录、手机号登录、自定义并发、管理、查询、授权、检测授权过期以及Token失效推送等功能<br>❷部分功能的实现需自行添加计划任务伪装管理员定时，了解如何添加计划任务请看移动云盘插件介绍，关于指令『慧生活检测』与『慧生活清理』定时『30 18 * * *』，关于指令『慧生活一键运行』定时『0 7,19 * * *』<img src="https://gcore.jsdelivr.net/gh/lhz03/img@7b9ff2cf7c406da88575a68400cff2d4604ddaca/2026/04/08/ab67377a6deec9c1303a10353b9d7666.png">]
+# [description: ❶慧生活798内置任务插件，自动完成每日任务获取315左右积分，支持Token登录、手机号登录、自定义并发、管理、查询、授权、检测授权过期以及Token失效推送等功能<br>❷部分功能的实现需自行添加计划任务伪装管理员定时，了解如何添加计划任务请看移动云盘插件介绍，关于指令『慧生活检测』与『慧生活清理』定时『30 18 * * *』，关于指令『慧生活一键运行』定时『0 7,19 * * *』<br>❸新增设备管理，支持模拟扫码添加设备、查询设备场所|余额|账单详情、切换积分抵扣、立即使用、立即结算等功能<img src="https://gcore.jsdelivr.net/gh/lhz03/img@7b9ff2cf7c406da88575a68400cff2d4604ddaca/2026/04/08/ab67377a6deec9c1303a10353b9d7666.png">]
 
 # [param: {"required":true,"key":"yuhua_hsh.zsm","bool":false,"placeholder":"","name":"收款码子","desc":"微信Bot收款码直链"}]
 # [param: {"required":true,"key":"yuhua_hsh.price","bool":false,"placeholder":"","name":"收费价格","desc":"不填默认0元，单位: 元/月"}]
@@ -21,6 +21,8 @@
 
 import re
 import time
+import os
+import io
 from datetime import datetime, timedelta
 import middleware
 import urllib.parse
@@ -32,9 +34,147 @@ import random
 import sys
 import threading
 import base64
-import hashlib 
+import hashlib
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ============ 二维码本地解码 (opencv, 懒加载; 单文件插件内联) ============
+try:
+    import numpy as np
+    _QR_HAVE_NUMPY = True
+except Exception:
+    np = None
+    _QR_HAVE_NUMPY = False
+try:
+    from PIL import Image as _PILImage
+    _QR_HAVE_PIL = True
+except Exception:
+    _PILImage = None
+    _QR_HAVE_PIL = False
+
+_CV2_MOD = None
+_CV2_TRYED = False
+_CV2_ERR = None   # 记录 import cv2 的真实异常，便于排查(默认是"缺依赖"但实际可能是DLL/numpy问题)
+
+def _cv2():
+    """懒加载 opencv; 失败返回 None"""
+    global _CV2_MOD, _CV2_TRYED, _CV2_ERR
+    if _CV2_TRYED:
+        return _CV2_MOD
+    _CV2_TRYED = True
+    try:
+        import cv2
+        _CV2_MOD = cv2
+    except Exception as e:
+        _CV2_MOD = None
+        _CV2_ERR = repr(e)
+        if DEBUG:
+            printf(f"cv2 import 失败: {_CV2_ERR}", "WARN")
+    return _CV2_MOD
+
+_QR_DID_RE = re.compile(r'(?:did|dev(?:ice)?(?:_?id)?)[=/:]([0-9]{6,25})', re.I)
+
+def _qr_extract_did(text):
+    """从二维码文本提取设备号: hnkzy URL / id= 参数 / 纯数字"""
+    if not text:
+        return None
+    text = str(text).strip()
+    m = re.search(r'(?:[?&]|^)id=([0-9]{6,25})(?:&|$)', text)
+    if m:
+        return m.group(1)
+    m = _QR_DID_RE.search(text)
+    if m:
+        return m.group(1)
+    m = re.search(r'/(\d{6,25})(?:[/?#]|$)', text)
+    if m:
+        return m.group(1)
+    m = re.fullmatch(r'\d{6,25}', text)
+    if m:
+        return m.group(0)
+    return None
+
+def _qr_to_array(img):
+    """PIL/bytes/ndarray -> ndarray(RGB)"""
+    if img is None:
+        return None
+    try:
+        if isinstance(img, np.ndarray):
+            return img if img.ndim in (2, 3) else None
+        if _QR_HAVE_PIL and isinstance(img, _PILImage.Image):
+            return np.asarray(img.convert('RGB'))
+        if isinstance(img, (bytes, bytearray)):
+            if _QR_HAVE_PIL:
+                im = _PILImage.open(io.BytesIO(bytes(img)))
+                return np.asarray(im.convert('RGB'))
+            return None
+    except Exception:
+        return None
+    return None
+
+def _qr_decode_opencv(data):
+    """用 OpenCV QRCodeDetector 解码 (多解: 原图+旋转+缩放, 提高拍歪成功率)"""
+    cv2 = _cv2()
+    if cv2 is None:
+        return []
+    arr = _qr_to_array(data)
+    if arr is None or arr.size == 0:
+        return []
+    detector = cv2.QRCodeDetector()
+    out = []
+    candidates = [arr]
+    # 附加旋转90/180/270 与灰度, 增强鲁棒性
+    try:
+        g = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        candidates.append(g)
+        for ang in (90, 180, 270):
+            M = cv2.getRotationMatrix2D((arr.shape[1] / 2.0, arr.shape[0] / 2.0), ang, 1.0)
+            rot = cv2.warpAffine(arr, M, (arr.shape[1], arr.shape[0]), flags=cv2.INTER_NEAREST)
+            candidates.append(rot)
+    except Exception:
+        pass
+    seen = set()
+    for cand in candidates:
+        try:
+            val, pts, _ = detector.detectAndDecode(cand)
+            if val and val not in seen:
+                seen.add(val)
+                out.append(val)
+        except Exception:
+            continue
+    return out
+
+def _qr_decode_worker(data, result):
+    try:
+        result['texts'] = _qr_decode_opencv(data)
+    except Exception as e:
+        result['error'] = str(e)
+
+def qr_decode(data, timeout=10):
+    """解码二维码图片 bytes, 返回文本列表; 超时/失败返回 []"""
+    result = {}
+    try:
+        t = threading.Thread(target=_qr_decode_worker, args=(data, result), daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            return []
+        return result.get('texts', [])
+    except Exception:
+        return []
+
+def _decode_qr_from_msg(msg):
+    """从消息提取图片并本地解码, 返回 (解码文本, 设备号did)"""
+    src = _extract_image_source(msg)
+    if not src:
+        return None, None
+    data = _fetch_image_bytes(src)
+    if not data:
+        return None, None
+    texts = qr_decode(data)
+    if not texts:
+        return None, None
+    did = _qr_extract_did(texts[0])
+    return texts[0], did
  
 # 封装函数：支持颜色分级(INFO=绿, WARN=黄, 其他=红)，输出到stderr确保控制台可见
 def printf(msg,level='INFO'):
@@ -98,7 +238,7 @@ def token_online_login():
 
     process_login_success(token)
 
-def sms_login_interaction():
+def sms_login_interaction(platform="app"):
     """
     【短信登录功能】
     自动处理算术验证码并发送短信
@@ -124,8 +264,8 @@ def sms_login_interaction():
 
     sender.reply("正在过数字计算...")
     
-    # 初始化临时 HSH 实例用于发送请求
-    hsh = HSH(token="") 
+    # 初始化临时 HSH 实例用于发送请求 (按平台选择请求头)
+    hsh = HSH(token="", platform=platform) 
     
     # 尝试发送短信（含验证码识别重试逻辑）
     send_ok, send_msg = hsh.send_sms_with_captcha(phone)
@@ -155,16 +295,16 @@ def sms_login_interaction():
     login_ok, token_or_msg = hsh.login_by_sms_code(phone, sms_code)
     
     if login_ok:
-        process_login_success(token_or_msg)
+        process_login_success(token_or_msg, platform=platform)
     else:
         sender.reply(f"❌ 登录失败: {token_or_msg}")
 
-def process_login_success(token):
+def process_login_success(token, platform="app"):
     """处理登录成功后的逻辑（Token验证与保存）"""
     sender.reply("正在验证凭证有效性...")
     try:
-        # 初始化API类进行验证
-        hsh = HSH(token)
+        # 初始化API类进行验证 (按登录平台选择请求头)
+        hsh = HSH(token, platform=platform)
         is_valid, msg = hsh.check_token()
         
         if not is_valid:
@@ -230,7 +370,7 @@ def get_global_session():
     session.mount('http://', adapter)
     session.mount('https://', adapter)
     session.headers.update({
-        'User-Agent': 'Android_ilife798_3.1.6',
+        'User-Agent': 'Android_ilife798_3.1.10',
         'Connection': 'Keep-Alive',
         'Accept-Encoding': 'gzip'
     })
@@ -346,15 +486,18 @@ class DdddocrClient:
 ###################### 慧生活798核心类 (HSH) ######################
 class HSH:
 
-    def _get_remote_sign(self, ad_id, uid):
+    def _get_remote_sign(self, ad_id, uid, platform="app"):
         SIGN_API_URL = "https://yuhualhh.250666.xyz/api/huishenghuo_sign.php"
         SIGN_API_KEY = "feiwu-cnmb-nmsl"
-    
+
         payload = {
             "adId": ad_id,
             "uid": str(uid),
             "token": str(self.token),
-            "apiKey": SIGN_API_KEY
+            "apiKey": SIGN_API_KEY,
+            # 通道决定 salt 与时间对齐粒度: app(1,1)=10秒 / 小程序(1,5)=30秒
+            # 必须与 _request_safe 送出的请求头保持一致, 否则服务端回 -1 验签失败
+            "platform": "mp" if platform == "zfb" else "app",
         }
     
         for i in range(3):
@@ -405,25 +548,44 @@ class HSH:
     
         return ""
         
-    def __init__(self, token, session=None):
+    def __init__(self, token, session=None, platform="app"):
         self.session = session or requests.Session()
         self.token = token
-        # 配置固定请求头
-        self.headers = {
-            "Authorization": self.token,
-            "ApplicationType": "1,1",
-            "VersionCode": "3.1.6",
-            "user-agent": "Android_ilife798_3.1.6",
-            "Host": "i.ilife798.com"
-        }
+        self.platform = platform
+        # 配置固定请求头 (按登录平台选择)
+        if platform == "zfb":
+            self.headers = {
+                "Authorization": self.token,
+                "ApplicationType": "1,5",
+                "VersionCode": "2.0.175",
+                "x-release-type": "ONLINE",
+                "alipayMiniMark": "1ZxYH945puiakh7m2yDcX+Dej067vmY/qfe6yORlQlIZWWiuTvpKpHx9t9009Lfz2j/PolGxbV6wcdJEpTRmt6QaUTKpvy5JrWJcv/tw8iE=",
+                "Referer": "https://2019061465519660.hybrid.alipay-eco.com/2019061465519660/0.2.2609141412.57/index.html",
+                "User-Agent": "Mozilla/5.0 (Linux; Android 15; RMX5060 Build/AP3A.240617.008; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/126.0.6478.122 Mobile Safari/537.36 NebulaSDK/1.8.100112 Nebula AlipayDefined(nt:5G,ws:425|0|2.9750001,ac:sp) AliApp(AP/12.12.26.8100) AlipayClient/12.12.26.8100 Language/zh-Hans isConcaveScreen/true Region/CN Ariver/12.12.26.8100",
+                "Accept": "*/*",
+                "Host": "i.ilife798.com"
+            }
+        else:
+            self.headers = {
+                "Authorization": self.token,
+                "ApplicationType": "1,1",
+                "VersionCode": "3.1.10",
+                "user-agent": "Android_ilife798_3.1.10",
+                "Host": "i.ilife798.com"
+            }
         self.stop_reason = None
 
     def _send_request(self, method, url, **kwargs):
         kwargs['session'] = self.session
-        # 合并Header
+        # 合并 Header (大小写不敏感，避免 app 头的 user-agent 残留)
         req_headers = self.headers.copy()
         if 'headers' in kwargs:
-            req_headers.update(kwargs['headers'])
+            for k, v in kwargs['headers'].items():
+                # 先删掉已有的同名 key（忽略大小写）
+                for old_k in list(req_headers.keys()):
+                    if old_k.lower() == k.lower():
+                        del req_headers[old_k]
+                req_headers[k] = v
             del kwargs['headers']
         
         try:
@@ -538,7 +700,7 @@ class HSH:
         url = "https://i.ilife798.com/api/v1/ui/app/master"
         res = self._send_request('GET', url)
         if not res: return False, {}
-        
+
         try:
             data = res.json()
             if data.get('code') == 0:
@@ -550,25 +712,42 @@ class HSH:
         except: pass
         return False, {}
 
-    def get_total_score(self):
-        """获取当前总积分"""
-        url = "https://i.ilife798.com/api/v1/acc/score/mission-lst"
+    def get_use_score(self):
+        """读取积分自动抵扣开关状态 (master 接口 account.useScore, 1=开 0=关)"""
+        url = "https://i.ilife798.com/api/v1/ui/app/master"
         res = self._send_request('GET', url)
-        if not res: return "0"
-        
+        if not res: return False, "网络请求失败"
         try:
             data = res.json()
-            if data.get('code') == 0:
-                return str(data.get('data', {}).get('accScoreRsp', {}).get('score', '0'))
-        except: pass
-        return "0"
+            if data.get('code') != 0:
+                return False, data.get('msg', '查询失败')
+            account = data.get('data', {}).get('account', {})
+            return True, int(account.get('useScore', 0))
+        except Exception:
+            return False, "响应解析失败"
+
+    def get_total_score(self):
+        """获取当前总积分; 返回 (True, 分数) 或 (False, 失败响应 dict, 保留 code 供上层判定)"""
+        url = "https://i.ilife798.com/api/v1/acc/score/mission-lst"
+        res = self._send_request('GET', url)
+        if not res: return False, {"code": None, "msg": "网络请求失败"}
+
+        try:
+            data = res.json()
+        except Exception:
+            return False, {"code": None, "msg": "响应解析失败"}
+        if not isinstance(data, dict):
+            return False, {"code": None, "msg": "响应格式异常"}
+        if data.get('code') == 0:
+            return True, str(data.get('data', {}).get('accScoreRsp', {}).get('score', '0'))
+        return False, data
 
     def get_today_score(self):
-        """获取今日获取的积分"""
+        """获取今日获取的积分; 返回 (True, 分数) 或 (False, 失败响应 dict)"""
         url = "https://i.ilife798.com/api/v1/acc/score/score-lst?page=0&size=20&hasCount=true"
         res = self._send_request('GET', url)
-        if not res: return "0"
-        
+        if not res: return False, {"code": None, "msg": "网络请求失败"}
+
         try:
             data = res.json()
             if data.get('code') == 0:
@@ -584,30 +763,178 @@ class HSH:
                     # ctime是记录时间
                     ctime = item.get('ctime', 0)
                     if ctime >= today_start_ms:
+                        # 排除消费类记录(type=107为"用户消费积分", 该类score为支出不应计入今日获取)
+                        item_type = item.get('type')
+                        data_obj = item.get('data', {}) or {}
+                        if item_type == 107 or data_obj.get('type') == 107:
+                            continue
                         # 累加分数, item['data']['score']可能是字符串
                         try:
-                            score_val = float(item.get('data', {}).get('score', 0))
+                            score_val = float(data_obj.get('score', 0))
                             today_sum += score_val
                         except: pass
                 
                 # 如果是整数则转int去掉小数点
                 if today_sum.is_integer():
-                    return str(int(today_sum))
-                return str(today_sum)
-        except: pass
-        return "0"
+                    return True, str(int(today_sum))
+                return True, str(today_sum)
+        except Exception:
+            return False, {"code": None, "msg": "响应解析失败"}
+        return False, data if isinstance(data, dict) else {"code": None, "msg": "响应格式异常"}
+      
+    def get_today_spend(self):
+        """获取今日消耗的积分; 返回 (True, 分数) 或 (False, 失败响应 dict)"""
+        url = "https://i.ilife798.com/api/v1/acc/score/score-lst?page=0&size=20&hasCount=true"
+        res = self._send_request('GET', url)
+        if not res: return False, {"code": None, "msg": "网络请求失败"}
+
+        try:
+            data = res.json()
+            if data.get('code') == 0:
+                score_list = data.get('data', [])
+                
+                # 获取今日零点的时间戳 (毫秒)
+                now = datetime.now()
+                today_start = datetime(now.year, now.month, now.day)
+                today_start_ms = int(today_start.timestamp() * 1000)
+                
+                today_spend = 0
+                for item in score_list:
+                    # ctime是记录时间
+                    ctime = item.get('ctime', 0)
+                    if ctime >= today_start_ms:
+                        # 仅统计消费类记录(type=107为"用户消费积分", 该类score/spend为支出)
+                        item_type = item.get('type')
+                        data_obj = item.get('data', {}) or {}
+                        if item_type != 107 and data_obj.get('type') != 107:
+                            continue
+                        # 累加消费积分, 优先取spend字段, 回退到score
+                        try:
+                            spend_val = float(data_obj.get('spend', data_obj.get('score', 0)) or 0)
+                            today_spend += spend_val
+                        except: pass
+                
+                # 如果是整数则转int去掉小数点
+                if today_spend.is_integer():
+                    return True, str(int(today_spend))
+                return True, str(today_spend)
+        except Exception:
+            return False, {"code": None, "msg": "响应解析失败"}
+        return False, data if isinstance(data, dict) else {"code": None, "msg": "响应格式异常"}
         
     def query_assets(self):
-        """聚合查询资产"""
+        """聚合查询资产; 返回 (True, dict) 或 (False, 失败响应 dict, 由上层 _fail_reason 判定)"""
         info_ok, info = self.get_user_info()
-        total = self.get_total_score()
-        today = self.get_today_score()
-        
-        return {
+        total_ok, total = self.get_total_score()
+        today_ok, today = self.get_today_score()
+        spend_ok, today_spend = self.get_today_spend()
+
+        # 任一取数失败必须把原始响应透传上去, 不能回落成 0 积分
+        if not total_ok:
+            return False, total
+        if not today_ok:
+            return False, today
+        if not spend_ok:
+            return False, today_spend
+
+        return True, {
             "total_score": total,
             "today_score": today,
+            "today_spend": today_spend,
             "valid": True
         }
+
+    ###################### 设备管理 API ######################
+    def qr_use(self, did):
+        """扫码解析设备 (对应抓包 /api/v1/qr/use)"""
+        url = f"https://i.ilife798.com/api/v1/qr/use?id={did}"
+        res = self._send_request('GET', url)
+        if not res: return False, "网络请求失败"
+        try:
+            data = res.json()
+        except Exception:
+            return False, "响应解析失败"
+        if data.get('code') != 0:
+            return False, data.get('msg', f"扫码失败 code={data.get('code')}")
+        return True, data.get('data', {})
+
+    def acc_upt(self, use_score=1):
+        """设置积分自动抵扣开关 (对应抓包 POST /api/v1/acc/upt, 幂等: useScore=1开 0关)"""
+        url = "https://i.ilife798.com/api/v1/acc/upt"
+        res = self._send_request('POST', url, json={"useScore": use_score})
+        if not res: return False, "网络请求失败"
+        try:
+            data = res.json()
+        except Exception:
+            return False, "响应解析失败"
+        if data.get('code') != 0:
+            return False, data.get('msg', f"设置失败 code={data.get('code')}")
+        return True, data.get('data', {})
+
+    def dev_status(self, did):
+        """查询设备状态 (对应抓包 /api/v1/ui/app/dev/status)"""
+        url = f"https://i.ilife798.com/api/v1/ui/app/dev/status?did={did}&more=false"
+        res = self._send_request('GET', url)
+        if not res: return False, "网络请求失败"
+        try:
+            data = res.json()
+        except Exception:
+            return False, "响应解析失败"
+        if data.get('code') != 0:
+            return False, data.get('msg', f"查询失败 code={data.get('code')}")
+        return True, data.get('data', {})
+
+    def dev_home(self, did):
+        """主页设备完整信息 (对应抓包 /api/v1/ui/app/dev/home/1, 含名称/场所/位置/型号)"""
+        url = f"https://i.ilife798.com/api/v1/ui/app/dev/home/1?did={did}&apply=6"
+        res = self._send_request('GET', url)
+        if not res: return False, "网络请求失败"
+        try:
+            data = res.json()
+        except Exception:
+            return False, "响应解析失败"
+        if data.get('code') != 0:
+            return False, data.get('msg', f"查询失败 code={data.get('code')}")
+        return True, data.get('data', {})
+
+    def dev_start(self, did):
+        """立即使用/开始计费 (对应抓包 /api/v1/dev/start)"""
+        url = f"https://i.ilife798.com/api/v1/dev/start?did={did}&upgrade=true&ptype=21&args=&rcp=false&cnt=1"
+        res = self._send_request('GET', url)
+        if not res: return False, "网络请求失败"
+        try:
+            data = res.json()
+        except Exception:
+            return False, "响应解析失败"
+        if data.get('code') != 0:
+            return False, data.get('msg', f"开始结算失败 code={data.get('code')}")
+        return True, data.get('data', {})
+
+    def dev_end(self, did):
+        """立即结算/结束计费 (对应抓包 /api/v1/dev/end)"""
+        url = f"https://i.ilife798.com/api/v1/dev/end?did={did}&rcp=false"
+        res = self._send_request('GET', url)
+        if not res: return False, "网络请求失败"
+        try:
+            data = res.json()
+        except Exception:
+            return False, "响应解析失败"
+        if data.get('code') != 0:
+            return False, data.get('msg', f"结束结算失败 code={data.get('code')}")
+        return True, data.get('data', {})
+
+    def bill_list(self, did, status=1):
+        """账单列表 (对应抓包 /api/v1/bill/lst-owner)"""
+        url = f"https://i.ilife798.com/api/v1/bill/lst-owner?page=0&size=20&hasCount=true&status={status}"
+        res = self._send_request('GET', url)
+        if not res: return False, "网络请求失败"
+        try:
+            data = res.json()
+        except Exception:
+            return False, "响应解析失败"
+        if data.get('code') != 0:
+            return False, data.get('msg', f"账单查询失败 code={data.get('code')}")
+        return True, data.get('data', [])
 
     def close(self):
         if self.session:
@@ -631,8 +958,27 @@ class HSH:
         msg = str(data.get("msg") or "")
         if code == -99:
             return True
-        fatal_keywords = ("登录状态已过期", "登录过期", "token", "未登录", "签名", "参数")
+        fatal_keywords = ("登录状态已过期", "登录过期", "token", "未登录", "签名", "验签", "参数")
         return any(k in msg for k in fatal_keywords)
+
+    def _fail_reason(self, resp):
+        """按响应判定"该给用户看什么原因"(供查询/展示类接口复用, 不要用它决定是否熔断)
+
+        判定顺序: code(-98 限频 / -99 登录过期) 优先, msg 关键词兜底, 最后原样回显服务端 msg。
+        与 _is_fatal_biz_error 的区别: 那个是"要不要停止后续任务"(宁滥勿缺),
+        这个是"跟用户怎么解释"(宁准勿滥), 所以不能直接复用同一套关键词。
+        """
+        resp = resp if isinstance(resp, dict) else {"code": None, "msg": resp}
+        code = resp.get('code')
+        msg = str(resp.get('msg') or '').strip()
+        if self._is_rate_limited(resp):
+            return f"{msg or '请求过于频繁'}，请稍后再试"
+        low = msg.lower()
+        if code == -99 or any(k in msg for k in ("过期", "失效", "未登录")) or "token" in low:
+            return "登录凭证已失效，请重新登录"
+        if msg:
+            return msg
+        return f"读取失败(code={code})" if code is not None else "网络请求失败"
 
     def _mark_stop(self, reason):
         if reason and not self.stop_reason:
@@ -641,14 +987,19 @@ class HSH:
                 printf(f"账号中止: {self.stop_reason}", "WARN")
 
     def _request_safe(self, method, url, platform="app", data=None, retry=2):
-        ALIPAY_MARK = "OYXJAQr4Vqk8SjMj4n6ostz/6/P8CaZkBPa9NZDpidIZXPE35hjWe8pwKUI9JRTFnumqXjVxUEFy2qxssdEOaM41RcB7nlw2D0f7f4M5reQ="
+        # 与 HSH.__init__ 里 ZFB 分支保持一致（已在登录接口验证有效）
+        ALIPAY_MARK = "1ZxYH945puiakh7m2yDcX+Dej067vmY/qfe6yORlQlIZWWiuTvpKpHx9t9009Lfz2j/PolGxbV6wcdJEpTRmt6QaUTKpvy5JrWJcv/tw8iE="
+        ALIPAY_UA   = "Mozilla/5.0 (Linux; Android 15; RMX5060 Build/AP3A.240617.008; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/126.0.6478.122 Mobile Safari/537.36 NebulaSDK/1.8.100112 Nebula AlipayDefined(nt:5G,ws:425|0|2.9750001,ac:sp) AliApp(AP/12.12.26.8100) AlipayClient/12.12.26.8100 Language/zh-Hans isConcaveScreen/true Region/CN Ariver/12.12.26.8100"
         req_headers = {}
         if platform == "zfb":
             req_headers = {
                 "ApplicationType": "1,5",
-                "VersionCode": "2.0.83",
-                "alipayMiniMark": ALIPAY_MARK,
-                "User-Agent": "Mozilla/5.0 (Linux; Android 15; RMX5060 Build/AP3A.240617.008; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/126.0.6478.122 Mobile Safari/537.36 AlipayClient/10.8.76.8100"
+                "VersionCode": "2.0.175",                      # ← 与登录一致
+                "x-release-type": "ONLINE",
+                "alipayMiniMark": ALIPAY_MARK,                  # ← 与登录一致
+                "Referer": "https://2019061465519660.hybrid.alipay-eco.com/2019061465519660/0.2.2609141412.57/index.html",
+                "User-Agent": ALIPAY_UA,                        # ← 与登录一致
+                "Accept": "*/*",
             }
         for i in range(retry):
             try:
@@ -799,18 +1150,18 @@ class HSH:
         while True:
             if self.stop_reason:
                 return False, self.stop_reason
-            sign = self._get_remote_sign("DAILY_CHECK_IN", uid)
+            sign = self._get_remote_sign("DAILY_CHECK_IN", uid, "zfb")
             if not sign:
                 self._mark_stop("获取签名失败")
                 return False, "获取签名失败"
-            url = f"https://i.ilife798.com/api/v1/acc/score/score-send?sign={sign}&s=1"
+            url = f"https://i.ilife798.com/api/v1/acc/score/score-send?sign={sign}&s=true"
             payload = {
                 "adId": "DAILY_CHECK_IN",
                 "addScore": score,
                 "addScoreType": 3 if is_retro else 1,
                 "weekday": weekday_iso
             }
-            data = self._request_safe("POST", url, "app", payload)
+            data = self._request_safe("POST", url, "zfb", payload)
             if data and data.get("code") == 0:
                 tag = "补签" if is_retro else "签到"
                 return True, f"{tag}成功({score}分)"
@@ -896,7 +1247,7 @@ class HSH:
             while True:
                 if self.stop_reason:
                     break
-                sign = self._get_remote_sign(cfg["adId"], uid)
+                sign = self._get_remote_sign(cfg["adId"], uid, cfg.get("platform", "app"))
                 if not sign:
                     fail_streak += 1
                     self._mark_stop("获取签名失败")
@@ -953,9 +1304,9 @@ class HSH:
         
         # 任务配置 (与脚本保持一致)
         TASKS_CONFIG = {
-            "CHECKIN":    {"name": "每日签到",  "adId": "DAILY_CHECK_IN", "limit": 1, "platform": "app", "score": 5},
-            "APP_VIDEO":  {"name": "APP看视频", "adId": "1705776998",     "limit": 5, "platform": "app", "score": 30},
-            "APP_AD":     {"name": "APP看广告", "adId": "popsreen",       "limit": 5, "platform": "app", "score": 10},
+            "CHECKIN":    {"name": "每日签到",  "adId": "DAILY_CHECK_IN", "limit": 1, "platform": "zfb", "score": 5},
+            "APP_VIDEO":  {"name": "APP看视频", "adId": "1705776998",     "limit": 5, "platform": "zfb", "score": 30},
+            "APP_AD":     {"name": "APP看广告", "adId": "popsreen",       "limit": 5, "platform": "zfb", "score": 10},
             "ZFB_VIDEO":  {"name": "ZFB看视频", "adId": "ad_tiny_2019061465519660_202402222200083035", "limit": 5, "platform": "zfb", "score": 20},
             "ZFB_WAIMAI": {"name": "ZFB点外卖", "adId": "1435961748560572416", "limit": 1, "platform": "zfb", "score": 10}
         }
@@ -1001,7 +1352,7 @@ class HSH:
             last_progress_snapshot = progress_snapshot
     
             # 4. 如果刚签到过，休息一下再做任务 (防频繁)
-            if did_sign: 
+            if did_sign:
                 time.sleep(15)
     
             # 5. 执行通用任务
@@ -1067,6 +1418,1061 @@ def gen_unique_id(prefix=""):
     timestamp = int(time.time() * 1_000_000)
     return f"{prefix}{timestamp}"
 
+###################### 设备管理模块（模拟扫码设备） ######################
+# 设备固定保存在个人数据桶 yuhua_hsh_dev / 按 userid 存放
+DEV_BUCKET = 'yuhua_hsh_dev'
+DEV_BUCKET_LIST = 'yuhua_hsh_dev_list'
+
+def _dev_list_raw():
+    return eval(middleware.bucketGet(DEV_BUCKET_LIST, userid) or '[]')
+
+def _dev_list():
+    """返回 (devices, devs_by_id)"""
+    devs = _dev_list_raw()
+    return devs, {d.get('id'): d for d in devs}
+
+def _dev_save(devs):
+    middleware.bucketSet(DEV_BUCKET_LIST, userid, str(devs))
+
+def _dev_get(did):
+    devs = _dev_list_raw()
+    for d in devs:
+        if d.get('id') == did:
+            return d
+    return None
+
+def _dev_patch(did, **fields):
+    devs = _dev_list_raw()
+    for d in devs:
+        if d.get('id') == did:
+            d.update(fields)
+            _dev_save(devs)
+            return d
+    return None
+
+def _dev_login_accounts():
+    """返回所有已登录的账号 uid 列表"""
+    accounts = eval(uservalue or '[]')
+    return [str(a) for a in accounts if middleware.bucketGet('yuhua_hsh_token', str(a))]
+
+def _dev_token_for(d, uid=None):
+    """取指定账号(或默认第一个已登录账号)的 token"""
+    if uid:
+        return middleware.bucketGet('yuhua_hsh_token', str(uid))
+    uids = _dev_login_accounts()
+    return middleware.bucketGet('yuhua_hsh_token', str(uids[0])) if uids else None
+
+def _dev_token_uid(d, uid=None):
+    """取实际使用的账号 uid (指定或默认第一个已登录账号)"""
+    if uid:
+        return str(uid)
+    uids = _dev_login_accounts()
+    return uids[0] if uids else None
+
+def _dev_add_uid(d, uid):
+    """把账号并入设备归属列表"""
+    uids = d.get('uids') or []
+    if uid not in uids:
+        uids.append(uid)
+    _dev_patch(d.get('id'), uids=uids)
+
+def _dev_mark_session(did, on_off, uid=None):
+    if on_off:
+        _dev_patch(did, use_ts=int(time.time() * 1000), use_uid=str(uid or ''))
+    else:
+        _dev_patch(did, use_ts=0, use_uid='')
+
+def _dev_is_using(d):
+    ts = int(d.get('use_ts') or 0)
+    return ts > 0 and (time.time() * 1000 - ts) < 30 * 60 * 1000
+
+def _mask_did(did):
+    s = str(did or '')
+    if len(s) > 12:
+        return s[:6] + '****' + s[-4:]
+    return s
+
+def _fetch_dev_view(hsh, did):
+    """拉取设备实时信息, 返回 (ok, msg, view dict)
+    dev/status 提供实时余额(subs), home/1 提供名称/场所/位置/型号, 合并两者"""
+    ok, data = hsh.dev_status(did)
+    if not ok:
+        return False, data, None
+    st_dev = data.get('device', {}) or {}
+    dev = dict(st_dev)  # status 精简字段 + 实时 subs
+    # 补调 home/1 获取完整设备信息 (名称/场所/位置/型号)
+    try:
+        h_ok, h_data = hsh.dev_home(did)
+        if h_ok:
+            h_dev = (h_data or {}).get('device', {}) or {}
+            if h_dev:
+                # status 优先保留实时 subs/gene, home 补充其余完整字段; bm 合并补齐
+                subs = dev.get('subs') or h_dev.get('subs') or []
+                cur_bm = dev.get('bm') or {}
+                h_bm = h_dev.get('bm') or {}
+                if isinstance(cur_bm, dict) and isinstance(h_bm, dict):
+                    merged_bm = dict(cur_bm)
+                    for k, v in h_bm.items():
+                        if k not in merged_bm or not merged_bm.get(k):
+                            merged_bm[k] = v
+                    dev['bm'] = merged_bm
+                for k, v in h_dev.items():
+                    if k not in dev or not dev.get(k):
+                        dev[k] = v
+                dev['subs'] = subs
+    except Exception:
+        pass
+    ep = dev.get('ep', {}) or {}
+    bm = dev.get('bm', {}) or {}
+    subs = dev.get('subs') or []
+    out = 0.0
+    for s in subs:
+        try:
+            out += float(s.get('out') or 0)
+        except Exception:
+            pass
+    view = {
+        'id': did,
+        'name': dev.get('name') or '',
+        'gtype': dev.get('gtype'),
+        'ntype': dev.get('ntype'),
+        'status': dev.get('status'),
+        'gene': dev.get('gene') or {},
+        'out': out,
+        'epName': ep.get('name') or '',
+        'epContact': (ep.get('contact') or {}).get('name') or '',
+        'epPhone': (ep.get('contact') or {}).get('pn') or '',
+        'model': bm.get('model') or '',
+        'brand': bm.get('brand') or '',
+        'fetti': dev.get('fmv') or '',
+        'loc': (dev.get('addr') or {}).get('detail') or '',
+        'dev': dev,
+    }
+    return True, '', view
+
+def _batch_refresh_status(devs, uid=None):
+    """批量实时拉取设备服务端状态, 返回 {did: {'status': code, 'out': float}}
+    同时同步本地 use_ts 缓存, 供 _dev_is_using 等旧逻辑保持一致"""
+    status_map = {}
+    if not devs:
+        return status_map
+    use_uid = uid or _dev_token_uid(None)
+    if not use_uid:
+        return status_map
+    token = _dev_token_for(None, use_uid)
+    if not token:
+        return status_map
+    hsh = HSH(token)
+    try:
+        for d in devs:
+            did = d.get('id')
+            if not did:
+                continue
+            try:
+                s_ok, s_data = hsh.dev_status(did)
+                if s_ok:
+                    dev = (s_data or {}).get('device', {}) or {}
+                    gene = dev.get('gene') or {}
+                    subs = dev.get('subs') or []
+                    code = str(gene.get('status') or '')
+                    # 实时累加出水量
+                    out = 0.0
+                    for s in subs:
+                        try:
+                            out += float(s.get('out') or 0)
+                        except Exception:
+                            pass
+                    status_map[did] = {'status': code, 'out': out}
+                    # 同步本地 use_ts 缓存, 保持后续 _dev_is_using 判断一致
+                    if code == '1':
+                        _dev_mark_session(did, True, use_uid)
+                    elif code == '99':
+                        _dev_mark_session(did, False)
+            except Exception:
+                pass
+    finally:
+        hsh.close()
+    return status_map
+
+
+def _fmt_dev_brief(view, status_info=None):
+    """列表项: 名称 | 场所 | 状态 | 余额"""
+    name = view.get('name') or _mask_did(view.get('id', ''))
+    ep = view.get('epName') or ''
+    # 优先用服务端实时数据, 没有时用本地缓存兜底
+    if status_info:
+        code = status_info.get('status')
+        out_val = status_info.get('out')
+    else:
+        code = None
+        out_val = view.get('out')
+    if code == '99':
+        status = '⏸ 空闲'
+    elif code == '1':
+        status = '🔄 使用中'
+    elif code:
+        status = f'❓ {code}'
+    else:
+        status = '🔄 使用中' if _dev_is_using(view) else '⏸ 空闲'
+    out = ''
+    try:
+        if out_val is not None:
+            out = f" | 💰{out_val}"
+    except Exception:
+        pass
+    line = f"{name}{' | ' + ep if ep else ''} | {status}{out}"
+    return line
+
+
+def _fmt_dev_detail(view):
+    id_ = view.get('id')
+    dev = view.get('dev') or {}
+    ep = dev.get('ep', {}) or {}
+    bm = dev.get('bm', {}) or {}
+    addr = dev.get('addr', {}) or {}
+    geo = None
+    try:
+        geo = (addr.get('geo') or {}).get('coordinates')
+    except Exception:
+        geo = None
+    gene = dev.get('gene') or {}
+    subs = dev.get('subs') or []
+    out = 0.0
+    for s in subs:
+        try:
+            out += float(s.get('out') or 0)
+        except Exception:
+            pass
+    # 短响应可能没有 name/loc, 用缓存字段兜底
+    name = dev.get('name') or view.get('name') or '未知'
+    ep_name = ep.get('name') or view.get('epName') or '未知'
+    # 当前所选账号
+    cur_uid = view.get('curUid')
+    detail = f"=====设备详情=====\n"
+    detail += f"📇 编号: {id_}\n"
+    detail += f"🏷 名称: {name}\n"
+    detail += f"🏢 场所: {ep_name}\n"
+    if cur_uid:
+        p = middleware.bucketGet('yuhua_hsh_phone', str(cur_uid)) or str(cur_uid)
+        detail += f"👤 账号: {_mask_identifier(p)}\n"
+    detail += f"🔧 型号: {bm.get('brand') or '未知'} {bm.get('model') or ''}\n"
+    detail += f"📍 位置: {addr.get('prov') or ''}{addr.get('city') or ''}{addr.get('dist') or ''} {addr.get('detail') or ''}\n"
+    if geo and len(geo) >= 2:
+        detail += f"🗺 经纬: {geo[1]}, {geo[0]}\n"
+    detail += f"💰 余额/用量: {out}\n"
+    detail += f"⚙️ 状态: {gene.get('status')}  mode={gene.get('mode')}\n"
+    if cur_uid:
+        sc_state = '❓ 未知' if view.get('scoreOn') is None else ('✅ 开启' if view.get('scoreOn') == 1 else '❌ 关闭')
+        detail += f"🎫 积分抵扣: {sc_state}\n"
+    detail += f"\n📊 最近账单:\n"
+    bills = view.get('bills') or []
+    if not bills:
+        detail += "目录为空\n"
+    else:
+        for b in bills[:5]:
+            detail += _fmt_bill_line(b)
+    detail += "=================="
+    return detail
+
+def _fmt_bill_line(b):
+    try:
+        from datetime import datetime as _dt
+        ts = int(b.get('ctime') or b.get('t') or 0) / 1000
+        t = _dt.fromtimestamp(ts).strftime('%m-%d %H:%M')
+    except Exception:
+        t = '-'
+    try:
+        amount = float(b.get('money') or b.get('amount') or 0)
+    except Exception:
+        amount = 0
+    try:
+        out = float(b.get('out') or 0)
+    except Exception:
+        out = 0
+    try:
+        status = int(b.get('status') or 0)
+    except Exception:
+        status = 0
+    st = {0: '待付', 1: '已付', 2: '结算中', 99: '进行中'}.get(status, str(status))
+    return f"{t} {st} 金额:{amount} 用量:{out} id:{b.get('id') or ''}\n"
+
+CQ_IMG_RE = re.compile(r'\[CQ:image[^\]]*?((?:file|url)=[^,\]^\s]+)\]')
+
+def _extract_image_source(msg):
+    """从消息文本提取可下载的图片源(file= / url= / base64:// / http(s)://)"""
+    if not msg:
+        return None
+    m = CQ_IMG_RE.search(msg)
+    if m:
+        return m.group(1).split('=', 1)[1].strip()
+    msg = msg.strip()
+    if msg.startswith('base64://') or msg.startswith('http://') or msg.startswith('https://') or msg.startswith('file://'):
+        return msg
+    return None
+
+def _fetch_image_bytes(src):
+    """图片源 -> bytes (base64:// / http(s):// / file:// / 本地路径)"""
+    try:
+        if not src:
+            return None
+        if src.startswith('base64://'):
+            return base64.b64decode(src[len('base64://'):])
+        if src.startswith('http://') or src.startswith('https://'):
+            # 部分平台(如QQ频道)图片直链有防盗链, 需伪装浏览器 UA
+            resp = requests.get(src, timeout=20, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+                'Referer': src,
+            })
+            resp.raise_for_status()
+            return resp.content
+        if src.startswith('file://'):
+            import urllib.parse as _up
+            p = _up.unquote(src[len('file://'):])
+            if p.startswith('/') and len(p) >= 3 and p[2] == ':':
+                p = p[1:]
+            with open(p, 'rb') as f:
+                return f.read()
+        if os.path.exists(src):
+            with open(src, 'rb') as f:
+                return f.read()
+    except Exception as e:
+        if DEBUG:
+            printf(f"图片下载失败: {e}", "WARN")
+    return None
+
+def dev_add():
+    """【扫码添加设备】 等待二维码图片 -> 本地解码 -> 核实绑定"""
+    if not uservalue:
+        sender.reply(f"=====未绑定账号=====\n❌ 未找到任何账号信息\n💡 发送 {login_cmd} 绑定账号\n==================")
+        return
+    if not _QR_HAVE_NUMPY or _cv2() is None:
+        _dep_np = "有" if _QR_HAVE_NUMPY else "缺"
+        _dep_cv = "有" if _cv2() is not None else "缺"
+        _detail = _CV2_ERR or "未安装/未调用import cv2"
+        sender.reply(
+            "❌ 二维码解析依赖不可用\n"
+            f"numpy: {_dep_np} | cv2: {_dep_cv}\n"
+            f"真实原因: {_detail}\n"
+            "可尝试在共享依赖重装/降级:\n"
+            "  pip install --force-reinstall opencv-python-headless==4.10.0.84"
+        )
+        return
+    sender.reply("""
+=====添加设备=====
+请发送设备二维码图片
+(对着设备二维码拍照/截图发我)
+------------------
+请在60秒内完成
+回复"q"退出""")
+    raw = sender.input(60000, 0, False)
+    if not raw:
+        sender.reply("❌ 输入超时")
+        return
+    if raw.lower() == 'q':
+        sender.reply("✅ 已退出操作")
+        return
+    raw = raw.strip()
+    # 1) 尝试本地解码图片
+    text, did = _decode_qr_from_msg(raw)
+    if not did:
+        # 诊断信息: 帮助定位卡在哪一步
+        diag = []
+        # 依赖状态 (最优先展示, 线上多数是缺依赖; 有真实异常则显示真实原因)
+        _dep_cv_txt = "有" if _cv2() is not None else (f"缺({_CV2_ERR})" if _CV2_ERR else "缺(未安装)")
+        diag.append(f"依赖: numpy={'有' if _QR_HAVE_NUMPY else '缺'} PIL={'有' if _QR_HAVE_PIL else '缺'} opencv={_dep_cv_txt}")
+        src = _extract_image_source(raw)
+        diag.append(f"图片源: {'找到' if src else '未找到'}")
+        if src:
+            data = _fetch_image_bytes(src)
+            diag.append(f"下载: {'成功(' + str(len(data)) + 'B)' if data else '失败'}")
+            if data:
+                try:
+                    if _PILImage is None:
+                        diag.append("图片: PIL未安装，无法查看")
+                    else:
+                        im = _PILImage.open(io.BytesIO(data))
+                        diag.append(f"图片: {im.format} {im.size[0]}x{im.size[1]}")
+                except Exception:
+                    diag.append("图片: 无法解析(非图片数据?)")
+                texts = qr_decode(data)
+                if _cv2() is None:
+                    diag.append(f"解码: 跳过({_CV2_ERR or 'opencv未安装'})")
+                else:
+                    diag.append(f"解码: {'成功' if texts else '无结果(可能不是二维码/图片模糊)'}")
+                    if texts:
+                        diag.append(f"内容: {texts[0][:100]}")
+        diag.append(f"原文: {raw[:80]}")
+        sender.reply("❌ 未识别到二维码图片\n" + "\n".join(diag))
+        return
+    sender.reply(f"✅ 已解析二维码: {text[:120]}\n📇 设备号: {did}\n正在核实...")
+    # 2) 设备固定: 已存在则提示 (设备只有一台, 不重复建)
+    exist = _dev_get(did)
+    if exist:
+        sender.reply(f"✅ 设备 {_mask_did(did)} 已在列表中\n💡 发送\"慧生活设备\"选择账号使用吧")
+        return
+    # 3) 需要至少一个已登录账号来核实设备
+    login_uids = _dev_login_accounts()
+    if not login_uids:
+        sender.reply("❌ 名下没有已登录的账号，请先登录")
+        return
+    token = middleware.bucketGet('yuhua_hsh_token', login_uids[0])
+    hsh = HSH(token)
+    try:
+        ok, qr_data = hsh.qr_use(did)
+        if not ok:
+            sender.reply(f"❌ 设备核实失败: {qr_data}")
+            return
+        qr = qr_data.get('qr') or {}
+        qr_type = qr.get('type')
+        # 拉一次完整状态
+        ok2, err2, view = _fetch_dev_view(hsh, did)
+        if not ok2:
+            sender.reply(f"⚠️ 设备已识别但状态拉取失败: {err2}")
+            view = {'id': did, 'name': ''}
+        # 设备固定: 只存设备信息, 不绑定账号 (操作时可选任意已登录账号)
+        view['qrType'] = qr_type
+        view['add_ts'] = int(time.time() * 1000)
+        view['use_ts'] = 0
+        view['use_uid'] = ''
+        dev_by_id = _dev_list()[1]
+        dev_by_id[did] = view
+        _dev_save(list(dev_by_id.values()))
+        sender.reply(f"""
+=====设备添加成功=====
+📇 编号: {did}
+🏷 名称: {view.get('name') or '未知'}
+🏢 场所: {view.get('epName') or '未知'}
+------------------
+发送"慧生活设备"选择账号使用吧
+==================""")
+    finally:
+        hsh.close()
+
+def dev_list(uid=None):
+    """【设备列表】"""
+    devs, _ = _dev_list()
+    # 实时拉取每台设备状态, 避免显示本地缓存的陈旧状态
+    status_map = _batch_refresh_status(devs, uid)
+    msg = "=====设备列表=====\n"
+    msg += "[0] 全部立即结算\n"
+    msg += "[1] 添加新设备\n"
+    msg += "[2] 删除设备\n"
+    if not devs:
+        msg += "------------------\n❌ 暂无已添加设备\n"
+    else:
+        for i, d in enumerate(devs, 1):
+            did = d.get('id')
+            msg += f"------------------\n[{i + 2}] {_fmt_dev_brief(d, status_map.get(did))}\n"
+    msg += "------------------\n回复数字选择\n回复'q'退出\n=================="
+    sender.reply(msg)
+    choice = sender.input(60000, 0, False)
+    if not choice or choice.lower() == 'q':
+        sender.reply("✅ 已退出操作")
+        return
+    try:
+        idx = int(choice)
+        if idx == 0:
+            dev_settle_all()
+        elif idx == 1:
+            dev_add()
+        elif idx == 2:
+            dev_remove()
+        elif 3 <= idx <= len(devs) + 2:
+            dev_detail(devs[idx - 3].get('id'), uid)
+        else:
+            raise ValueError()
+    except (ValueError, IndexError):
+        sender.reply("❌ 无效的选择")
+
+def dev_pick_account(title="账号"):
+    """列出所有已登录账号供选择, 返回所选 uid 或 None"""
+    uids = _dev_login_accounts()
+    if not uids:
+        sender.reply("❌ 名下没有已登录的账号，请先登录")
+        return None
+    menu = f"=====选择{title}=====\n"
+    for i, acc in enumerate(uids, 1):
+        p = middleware.bucketGet('yuhua_hsh_phone', str(acc)) or '未知'
+        auth_str = middleware.bucketGet('yuhua_hsh_auth', str(acc))
+        status_line = "⚠️ 未授权"
+        if auth_str:
+            try:
+                auth_date = datetime.strptime(auth_str, "%Y-%m-%d").date()
+                if auth_date > datetime.now().date():
+                    status_line = f"✅ {auth_date.strftime('%Y-%m-%d')}"
+                else:
+                    status_line = "❌ 已过期"
+            except ValueError:
+                status_line = "⚠️ 未授权"
+        menu += f"------------------\n[{i}] 账号信息\n🤪 账号: {_mask_identifier(p)}\n☁ 授权: {status_line}\n"
+    menu += "------------------\n回复数字选择账号\n回复'q'退出\n=================="
+    sender.reply(menu)
+    choice = sender.input(60000, 0, False)
+    if not choice or choice.lower() == 'q':
+        sender.reply("✅ 已退出操作")
+        return None
+    try:
+        idx = int(choice)
+        if not 1 <= idx <= len(uids):
+            raise ValueError()
+        return str(uids[idx - 1])
+    except (ValueError, IndexError):
+        sender.reply("❌ 无效的选择")
+        return None
+
+
+def dev_detail(did=None, uid=None):
+    """【设备详情+操作菜单】选设备后选账号, 用所选账号查详情"""
+    if not did:
+        did = _pick_device()
+        if not did:
+            return
+    # 若已传入账号上下文 (如从慧生活管理进入), 直接使用当前账号, 跳过选账号流程
+    if not uid:
+        uid = dev_pick_account("账号")
+        if not uid:
+            return
+    dev_detail_for(did, uid)
+
+def _pick_device():
+    devs, _ = _dev_list()
+    if not devs:
+        sender.reply("❌ 暂无设备")
+        return None
+    # 实时拉取每台设备状态
+    status_map = _batch_refresh_status(devs)
+    msg = "=====选择设备=====\n"
+    msg += "[0] 全部立即结算\n"
+    msg += "[1] 添加新设备\n"
+    msg += "[2] 删除设备\n"
+    for i, d in enumerate(devs, 1):
+        did = d.get('id')
+        msg += f"------------------\n[{i + 2}] {_fmt_dev_brief(d, status_map.get(did))}\n"
+    msg += "------------------\n回复数字选择\n回复'q'退出\n=================="
+    sender.reply(msg)
+    choice = sender.input(60000, 0, False)
+    if not choice or choice.lower() == 'q':
+        sender.reply("✅ 已退出操作")
+        return None
+    try:
+        idx = int(choice)
+        if idx == 0:
+            dev_settle_all()
+            return None
+        if idx == 1:
+            dev_add()
+            return None
+        if idx == 2:
+            dev_remove()
+            return None
+        if not 3 <= idx <= len(devs) + 2:
+            raise ValueError()
+        return devs[idx - 3].get('id')
+    except (ValueError, IndexError):
+        sender.reply("❌ 无效的选择")
+        return None
+
+def dev_op_menu(did, view, uid=None):
+    """设备操作: 立即使用/立即结算/切换账号 (用指定账号)"""
+    if not uid:
+        uid = view.get('curUid') or _dev_token_uid(None)
+    while True:
+        # 每次进入菜单前都实时拉取最新状态 (解决"操作后状态不更新"和"设备被外部关闭"的问题)
+        token = _dev_token_for(None, uid)
+        if not token:
+            sender.reply("❌ 该账号未登录")
+            return
+        hsh = HSH(token)
+        try:
+            ok, msg, new_view = _fetch_dev_view(hsh, did)
+            if not ok:
+                sender.reply(f"❌ 状态查询失败: {msg}")
+                return
+            d = _dev_get(did) or {}
+            new_view = dict(d, **new_view)
+            new_view['dev'] = new_view.get('dev') or {}
+            new_view['curUid'] = uid
+            # 实时查询积分抵扣状态
+            sc_ok, sc_val = _dev_query_score(hsh)
+            new_view['scoreOn'] = sc_val if sc_ok else None
+            # 实时查询账号总积分
+            try:
+                ts_ok, ts_val = hsh.get_total_score()
+                new_view['totalScore'] = ts_val if ts_ok else '0'
+            except Exception:
+                new_view['totalScore'] = '0'
+            # 缓存 name/out, 供列表页使用
+            live_name = new_view.get('name') or ''
+            if live_name and live_name != d.get('name'):
+                _dev_patch(did, name=live_name)
+            try:
+                live_out = float(new_view.get('out') or 0)
+                if live_out != d.get('out'):
+                    _dev_patch(did, out=live_out)
+            except Exception:
+                pass
+            view = new_view
+        finally:
+            hsh.close()
+
+        # 组装菜单 (状态以服务端 gene.status 为准: 99=空闲, 1=使用中)
+        name = view.get('name') or _mask_did(did)
+        gene = (view.get('dev') or {}).get('gene') or {}
+        status_code = str(gene.get('status') or '')
+        if status_code == '99':
+            status_line = '⏸ 空闲'
+        elif status_code == '1':
+            status_line = '🔄 使用中'
+        elif status_code:
+            status_line = f'❓ {status_code}'
+        else:
+            # 服务端没返回 status 时, 用本地缓存的 use_ts 兜底
+            status_line = '🔄 使用中' if _dev_is_using(view) else '⏸ 空闲'
+
+        cur_phone = ''
+        if uid:
+            p = middleware.bucketGet('yuhua_hsh_phone', str(uid)) or ''
+            cur_phone = _mask_identifier(p) if p else str(uid)
+        total_score = view.get('totalScore', '0')
+        sc_val = view.get('scoreOn')
+        sc_state = '❓ 未知' if sc_val is None else ('✅ 开启' if sc_val == 1 else '❌ 关闭')
+
+        menu = "=====设备操作=====\n"
+        menu += f"⚜️ 设备: {name}\n"
+        menu += f"📝 状态: {status_line}\n"
+        if cur_phone:
+            menu += f"🤪 账号: {cur_phone}\n"
+        menu += f"🎫 当前积分: {total_score}\n"
+        menu += f"🔆 积分抵扣: {sc_state}\n"
+        menu += "------------------\n"
+        menu += "[1] 立即使用\n[2] 立即结算\n[3] 刷新状态\n[4] 切换账号\n[5] 切换积分抵扣\n"
+        menu += "------------------\n回复数字选择操作\n回复'q'退出\n=================="
+        sender.reply(menu)
+
+        choice = sender.input(60000, 0, False)
+        if not choice or choice.lower() == 'q':
+            sender.reply("✅ 已退出操作")
+            return
+        if choice == '1':
+            dev_start(did, view, uid)
+        elif choice == '2':
+            dev_end(did, view, uid)
+        elif choice == '3':
+            # 每次循环已自动刷新, 这里提示一下即可
+            sender.reply("🔄 已刷新")
+            continue
+        elif choice == '4':
+            # 切换账号: 交给 dev_switch_account 打开新账号菜单, 本菜单退出
+            dev_switch_account(did)
+            return
+        elif choice == '5':
+            dev_toggle_score(did, uid)
+            continue
+        else:
+            sender.reply("❌ 无效的选择")
+
+def dev_switch_account(did):
+    """重新选择设备操作账号, 选好后直接用该账号进详情"""
+    uid = dev_pick_account("账号")
+    if not uid:
+        return
+    dev_detail_for(did, uid)
+
+def dev_toggle_score(did, uid):
+    """切换积分自动抵扣开关 (当前账号): 先实时查当前状态再取反"""
+    if not uid:
+        uid = _dev_token_uid(None)
+    token = _dev_token_for(None, uid)
+    if not token:
+        sender.reply("❌ 该账号未登录")
+        return
+    hsh = HSH(token)
+    try:
+        q_ok, cur_on = _dev_query_score(hsh)
+        if not q_ok or cur_on is None:
+            sender.reply("❌ 查询当前积分抵扣状态失败")
+            return
+        new_on = 0 if cur_on == 1 else 1
+        ok, msg = hsh.acc_upt(new_on)
+        if not ok:
+            sender.reply(f"❌ 设置积分抵扣失败: {msg}")
+            return
+        p = middleware.bucketGet('yuhua_hsh_phone', str(uid)) or str(uid)
+        state = '✅ 已开启' if new_on == 1 else '❌ 已关闭'
+        sender.reply(f"🎫 积分抵扣 {state}\n👤 账号: {_mask_identifier(p)}")
+    finally:
+        hsh.close()
+
+def dev_set_score_cmd(uid, on):
+    """指令设置积分抵扣 (开/关)"""
+    if not uid:
+        uid = _dev_token_uid(None)
+    token = _dev_token_for(None, uid)
+    if not token:
+        sender.reply("❌ 该账号未登录")
+        return
+    hsh = HSH(token)
+    try:
+        ok, msg = hsh.acc_upt(1 if on else 0)
+        if not ok:
+            sender.reply(f"❌ 设置积分抵扣失败: {msg}")
+            return
+        p = middleware.bucketGet('yuhua_hsh_phone', str(uid)) or str(uid)
+        state = '✅ 已开启' if on else '❌ 已关闭'
+        sender.reply(f"🎫 积分抵扣 {state}\n👤 账号: {_mask_identifier(p)}")
+    finally:
+        hsh.close()
+
+def _dev_query_score(hsh):
+    """实时查询积分自动抵扣开关状态, 返回 (ok, 1开/0关/None未知)"""
+    try:
+        ok, val = hsh.get_use_score()
+        if ok:
+            return True, int(val) if val in (0, 1) else None
+    except Exception:
+        pass
+    return False, None
+
+def _parse_status_from_device(dev):
+    """从 device 对象解析状态. 返回 dict:
+    {
+      'billing': '99'/'1'/''  (计费状态),
+      'physical': bool,       (物理出水/使用中),
+      'raw_status': int,      (原始 gene.status),
+      'raw_mode': int,        (原始 gene.mode),
+      'subs': [...]
+    }"""
+    gene = dev.get('gene') or {}
+    subs = dev.get('subs') or []
+    billing = str(gene.get('status') or '')
+    physical = any(str(s.get('status') or '0') != '0' for s in subs)
+    return {
+        'billing': billing,
+        'physical': physical,
+        'raw_status': gene.get('status'),
+        'raw_mode': gene.get('mode'),
+        'subs': subs,
+    }
+
+def _wait_status(hsh, did, expect, max_retries=5, interval=2):
+    """轮询等待服务端设备状态变为 expect ('1'=使用中 / '99'=空闲)
+    最多等 max_retries * interval 秒, 返回 True/False"""
+    for i in range(max_retries):
+        try:
+            s_ok, s_data = hsh.dev_status(did)
+            if s_ok:
+                gene = (s_data or {}).get('device', {}).get('gene') or {}
+                if str(gene.get('status')) == expect:
+                    return True
+        except Exception:
+            pass
+        time.sleep(interval)
+    return False
+
+def dev_detail_for(did, uid):
+    """用指定账号查设备详情"""
+    token = _dev_token_for(None, uid)
+    if not token:
+        sender.reply("❌ 该账号未登录")
+        return
+    hsh = HSH(token)
+    try:
+        ok, msg, view = _fetch_dev_view(hsh, did)
+        if not ok:
+            sender.reply(f"❌ 状态查询失败: {msg}")
+            return
+        b_ok, bills = hsh.bill_list(did)
+        d = _dev_get(did) or {}
+        view = dict(d, **view)
+        view['dev'] = view.get('dev') or {}
+        view['bills'] = bills if b_ok else []
+        view['curUid'] = uid
+        # 实时查询积分抵扣状态
+        sc_ok, sc_val = _dev_query_score(hsh)
+        view['scoreOn'] = sc_val if sc_ok else None
+        live_name = view.get('name') or ''
+        if live_name and live_name != d.get('name'):
+            _dev_patch(did, name=live_name)
+        try:
+            live_out = float(view.get('out') or 0)
+            if live_out != d.get('out'):
+                _dev_patch(did, out=live_out)
+        except Exception:
+            pass
+        sender.reply(_fmt_dev_detail(view))
+        dev_op_menu(did, view, uid)
+    finally:
+        hsh.close()
+
+
+def dev_start(did, view, uid=None):
+    """立即使用 (开始计费), 用指定账号"""
+    if not uid:
+        uid = view.get('curUid') or _dev_token_uid(None)
+    d = _dev_get(did)
+    if not d:
+        sender.reply("❌ 未找到设备")
+        return
+    token = _dev_token_for(None, uid)
+    if not token:
+        sender.reply("❌ 该账号未登录")
+        return
+    sender.reply("⏳ 正在处理...")   # ← 新增提示
+    hsh = HSH(token)
+    try:
+        # 先读真实状态, 已在使用中(status=1)则跳过
+        s_ok, s_data = hsh.dev_status(did)
+        if s_ok:
+            gene = (s_data or {}).get('device', {}).get('gene') or {}
+            if str(gene.get('status')) == '1':
+                _dev_mark_session(did, True, uid)
+                sender.reply(f"⚠️ 设备 {_mask_did(did)} 已在使用中，无需重复开启\n")
+                return
+        # 积分自动抵扣: 实时检测, 未开启就启动, 已开启保持不变
+        try:
+            q_ok, sc_val = _dev_query_score(hsh)
+            if q_ok and sc_val == 0:
+                s_ok2, s_msg = hsh.acc_upt(1)
+                if not s_ok2 and DEBUG:
+                    printf(f"积分自动抵扣开启失败: {s_msg}", "WARN")
+        except Exception as e:
+            if DEBUG:
+                printf(f"积分自动抵扣检测异常: {e}", "WARN")
+        ok, msg = hsh.dev_start(did)
+        if not ok:
+            sender.reply(f"❌ 开始使用失败: {msg}")
+            return
+        # 服务端状态异步更新, 回读不可靠; code=0 视为成功, 立即同步本地缓存
+        _dev_mark_session(did, True, uid)
+        # 等服务端状态追上, 保证返回菜单时状态显示正确 (最长约 10s)
+        if not _wait_status(hsh, did, '1', max_retries=5, interval=2):
+            if DEBUG:
+                printf("dev_start 后服务端状态未在 10s 内变为 1", "WARN")
+        sender.reply(f"✅ 设备 {_mask_did(did)} 已开始使用，费用已计\n")
+    finally:
+        hsh.close()
+
+def dev_end(did, view, uid=None):
+    """立即结算 (结束计费)"""
+    if not uid:
+        uid = view.get('curUid') or _dev_token_uid(None)
+    d = _dev_get(did)
+    if not d:
+        sender.reply("❌ 未找到设备")
+        return
+    token = _dev_token_for(None, uid)
+    if not token:
+        sender.reply("❌ 该账号未登录")
+        return
+    sender.reply("⏳ 正在处理...")   # ← 新增提示
+    hsh = HSH(token)
+    try:
+        # 先读真实状态
+        s_ok, s_data = hsh.dev_status(did)
+        if s_ok:
+            dev = (s_data or {}).get('device', {}) or {}
+            st = _parse_status_from_device(dev)
+            # 物理设备正在运行中: 无法通过 API 结算
+            if st['physical']:
+                sender.reply(f"⚠️ 设备 {_mask_did(did)} 正在运行中（出水/使用中），无法通过接口结算\n💡 请在设备上点击结算，或等设备自动结束\n")
+                return
+            # 已经是空闲且没有物理运行: 无需结算
+            if st['billing'] == '99':
+                _dev_mark_session(did, False, uid)
+                sender.reply(f"⚠️ 设备 {_mask_did(did)} 已是空闲状态，无需结算\n")
+                return
+        # 记录结算前积分
+        score_before = None
+        try:
+            sb_ok, sb_val = hsh.get_total_score()
+            score_before = int(sb_val) if sb_ok else None
+        except Exception:
+            score_before = None
+        ok, msg = hsh.dev_end(did)
+        if not ok:
+            if "设备运行中" in str(msg) or "设备正在" in str(msg):
+                sender.reply(f"⚠️ 设备 {_mask_did(did)} 正在运行中，无法通过接口结算\n💡 请在设备上点击结算，或等设备自动结束\n")
+                return
+            sender.reply(f"❌ 立即结算失败: {msg} (可再次尝试)")
+            return
+        _dev_mark_session(did, False, uid)
+        # 等服务端计费状态变为 99
+        if not _wait_status(hsh, did, '99', max_retries=5, interval=2):
+            if DEBUG:
+                printf("dev_end 后服务端状态未在 10s 内变为 99", "WARN")
+        # 结算后积分, 计算本次消耗
+        score_after = None
+        try:
+            sa_ok, sa_val = hsh.get_total_score()
+            score_after = int(sa_val) if sa_ok else None
+        except Exception:
+            score_after = None
+        consume_str = ""
+        if score_before is not None and score_after is not None:
+            consumed = score_before - score_after
+            if consumed > 0:
+                consume_str = f"，本次消耗 {consumed} 积分"
+            elif consumed < 0:
+                consume_str = f"，本次获得 {-consumed} 积分"
+            else:
+                consume_str = "，本次消耗 0 积分"
+        sender.reply(f"✅ 设备 {_mask_did(did)} 已结算{consume_str}\n")
+    finally:
+        hsh.close()
+
+def dev_settle_all():
+    """全部立即结算: 只结算正在使用中的设备, 每台用其启动账号(use_uid)结算,
+    失败只记单台原因并原样保留使用状态, 不连累其他设备"""
+    devs, _ = _dev_list()
+    if not devs:
+        sender.reply("❌ 暂无设备")
+        return
+    using = [d for d in devs if _dev_is_using(d)]
+    idle = [d for d in devs if not _dev_is_using(d)]
+    if not using:
+        sender.reply(f"=====结算完成=====\n✅ 无使用中的设备 (空闲 {len(idle)} 台)\n==================")
+        return
+    sender.reply(f"正在结算 {len(using)} 台使用中的设备...")
+    ok_n = 0
+    fail_n = 0
+    fail_msgs = []
+    idle_msgs = []
+    last_uid = None
+    for d in using:
+        did = d.get('id')
+        # 结算账号: 优先设备启动账号, 其次设备归属/已登录账号
+        uid = str(d.get('use_uid') or '')
+        token = _dev_token_for(None, uid) if uid else None
+        if not token:
+            owner = [str(u) for u in (d.get('uids') or [])
+                     if middleware.bucketGet('yuhua_hsh_token', str(u))]
+            uid = owner[0] if owner else None
+            token = _dev_token_for(None, uid) if uid else None
+        if not token:
+            fail_n += 1
+            fail_msgs.append(f"{_mask_did(did)}: 无可用的已登录账号")
+            continue
+        # 同账号连续结算间隔, 防止触发请求过于频繁
+        if last_uid and uid == last_uid:
+            time.sleep(0.3)
+        last_uid = uid
+        hsh = HSH(token)
+        try:
+            ok, msg = hsh.dev_end(did)
+            if ok:
+                _dev_mark_session(did, False)
+                ok_n += 1
+            else:
+                # 已结算过会返回失败, 回读一次状态确认是否真的还在计费
+                retried = False
+                try:
+                    s_ok, s_data = hsh.dev_status(did)
+                    if s_ok:
+                        gene = (s_data or {}).get('device', {}).get('gene') or {}
+                        if str(gene.get('status')) == '99':
+                            retried = True
+                            time.sleep(0.3)
+                            ok2, msg2 = hsh.dev_end(did)
+                            if ok2:
+                                _dev_mark_session(did, False)
+                                ok_n += 1
+                            else:
+                                msg = msg2
+                except Exception:
+                    pass
+                if not retried:
+                    fail_n += 1
+                    fail_msgs.append(f"{_mask_did(did)}: {msg}")
+        except Exception as e:
+            fail_n += 1
+            fail_msgs.append(f"{_mask_did(did)}: {str(e)}")
+        finally:
+            hsh.close()
+    msg = f"=====结算完成=====\n✅ 成功: {ok_n}\n❌ 失败: {fail_n}\n"
+    if idle_msgs:
+        msg += "------------------\n" + "\n".join(idle_msgs[:10]) + "\n"
+    if fail_msgs:
+        msg += "------------------\n" + "\n".join(fail_msgs[:10])
+    msg += "\n=================="
+    sender.reply(msg)
+
+def dev_remove(did=None):
+    """删除设备 (只删设备记录, 不动账号/授权)"""
+    if not did:
+        # 独立选择要删除的设备
+        devs = _dev_list_raw()
+        if not devs:
+            sender.reply("❌ 暂无设备")
+            return
+        menu = "=====删除设备=====\n"
+        menu += "回复'q'退出\n"
+        for i, d in enumerate(devs, 1):
+            menu += f"------------------\n[{i}] {_fmt_dev_brief(d)}\n"
+        menu += "------------------\n回复数字选择要删除的设备"
+        sender.reply(menu)
+        choice = sender.input(60000, 0, False)
+        if not choice or choice.lower() == 'q':
+            sender.reply("✅ 已退出操作")
+            return
+        try:
+            idx = int(choice)
+            if not 1 <= idx <= len(devs):
+                raise ValueError()
+            did = devs[idx - 1].get('id')
+        except (ValueError, IndexError):
+            sender.reply("❌ 无效的选择")
+            return
+    d = _dev_get(did)
+    if not d:
+        sender.reply("❌ 未找到设备")
+        return
+    name = d.get('name') or _mask_did(did)
+    sender.reply(f"⚠️ 确认删除设备「{name}」吗？(y/n)")
+    confirm = sender.input(30000, 0, False)
+    if not confirm:
+        sender.reply("❌ 输入超时")
+        return
+    if confirm.lower() in ('n', 'q'):
+        sender.reply("✅ 已退出操作")
+        return
+    if confirm.lower() != 'y':
+        sender.reply("❌ 无效的选择")
+        return
+    devs = _dev_list_raw()
+    devs = [d for d in devs if d.get('id') != did]
+    _dev_save(devs)
+    sender.reply(f"""
+=====删除成功=====
+📇 设备: {name}
+✅ 状态: 已删除本地记录
+==================""")
+
+def main_dev_command(message):
+    """设备指令入口: 设备 添加 / 管理 / 详情 / 使用 / 结算 / 删除 / 积分"""
+    if '积分开' in message:
+        uid = _dev_token_uid(None)
+        dev_set_score_cmd(uid, True)
+        return
+    if '积分关' in message:
+        uid = _dev_token_uid(None)
+        dev_set_score_cmd(uid, False)
+        return
+    if '积分切换' in message or ('积分' in message and '开关' in message):
+        uid = _dev_token_uid(None)
+        dev_toggle_score(None, uid)
+        return
+    if '管理' in message or message in ('慧生活设备', '慧生活设备管理'):
+        dev_list()
+        return
+    if '添加' in message:
+        dev_add()
+        return
+    if '删除' in message:
+        dev_remove()
+        return
+    # 其他: 设备详情菜单
+    dev_list()
+
 senderID = middleware.getSenderID()
 sender = middleware.Sender(senderID)
 userid = sender.getUserID()
@@ -1101,7 +2507,8 @@ def login():
     login_guide = """
 =====登录方式=====
 [1] Token登录
-[2] 手机号登录 (推荐)
+[2] 手机号登录 (APP)
+[3] 手机号登录 (ZFB)
 ------------------
 回复数字选择方式
 回复"q"退出"""
@@ -1120,7 +2527,9 @@ def login():
         if choice == '1':
             token_online_login()
         elif choice == '2':
-            sms_login_interaction()
+            sms_login_interaction(platform="app")
+        elif choice == '3':
+            sms_login_interaction(platform="zfb")
         else:
             sender.reply("❌ 无效的选择")
             return
@@ -1149,17 +2558,19 @@ def _query_single_account(unique_id):
         # 验证Token
         valid, msg = hsh.check_token()
         if not valid:
-            if "过期" in msg:
-                return f"【{phone_mask}】登录凭证已失效，请重新登录"
-            return f"【{phone_mask}】{msg}"
-            
-        assets = hsh.query_assets()
-        
+            return f"【{phone_mask}】{hsh._fail_reason(msg)}"
+
+        # 取数接口同样可能回 -99 登录状态已过期(而 acc/stat 仍放行), 按响应判定原因
+        assets_ok, assets = hsh.query_assets()
+        if not assets_ok:
+            return f"【{phone_mask}】{hsh._fail_reason(assets)}"
+
         return f"""
 =====账号信息=====
 🤪 账号: {phone_mask}
 🎫 当前积分: {assets.get('total_score', '0')}
 🎨 今日积分: {assets.get('today_score', '0')}
+📝 今日消耗: {assets.get('today_spend', '0')}
 ☁️ 授权到期: {auth_date.strftime('%Y-%m-%d')}
 =================="""
 
@@ -1464,6 +2875,7 @@ def show_account_menu(account):
 [1] 授权账号
 [2] 删除账号
 [3] 运行任务
+[4] 设备管理
 ------------------
 回复数字选择操作
 回复"q"退出"""
@@ -1482,6 +2894,8 @@ def show_account_menu(account):
     elif choice == '3':
         sender.reply("正在执行...")
         safe_reply(sender, _wrap_task_run(account))
+    elif choice == '4':
+        dev_list(account)
     else:
         sender.reply("❌ 无效的选择")
 
@@ -2059,6 +3473,8 @@ def main():
                 sender.reply("❌ 需要管理员权限")
                 return
             admin_run_all_tasks()
+        elif '设备' in message:
+            main_dev_command(message)
         else:
             sender.setContinue()
     except Exception as e:
