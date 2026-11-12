@@ -238,7 +238,7 @@ def token_online_login():
 
     process_login_success(token)
 
-def sms_login_interaction(platform="app"):
+def sms_login_interaction():
     """
     【短信登录功能】
     自动处理算术验证码并发送短信
@@ -264,8 +264,7 @@ def sms_login_interaction(platform="app"):
 
     sender.reply("正在过数字计算...")
     
-    # 初始化临时 HSH 实例用于发送请求 (按平台选择请求头)
-    hsh = HSH(token="", platform=platform) 
+    hsh = HSH(token="", platform="wx", login=True)
     
     # 尝试发送短信（含验证码识别重试逻辑）
     send_ok, send_msg = hsh.send_sms_with_captcha(phone)
@@ -295,7 +294,7 @@ def sms_login_interaction(platform="app"):
     login_ok, token_or_msg = hsh.login_by_sms_code(phone, sms_code)
     
     if login_ok:
-        process_login_success(token_or_msg, platform=platform)
+        process_login_success(token_or_msg)
     else:
         sender.reply(f"❌ 登录失败: {token_or_msg}")
 
@@ -400,11 +399,18 @@ def send_request_global(method, url, **kwargs):
                 printf(f"----- [RESPONSE - Attempt {attempt+1}] -----", "DEBUG")
                 printf(f"STATUS: {response.status_code}", "DEBUG")
                 printf(f"RSP HEADERS: {json.dumps(dict(response.headers), ensure_ascii=False)}", "DEBUG")
-                # 尝试解析JSON以便漂亮打印，否则打印文本
+                _ctype = str(response.headers.get('Content-Type') or '')
                 try:
-                    printf(f"RSP BODY: {json.dumps(response.json(), ensure_ascii=False)}", "DEBUG")
-                except:
-                    printf(f"RSP BODY: {response.text[:1000]}", "DEBUG")
+                    _blen = len(response.content)
+                except Exception:
+                    _blen = 0
+                if 'image' in _ctype.lower() or 'octet-stream' in _ctype.lower() or _blen > 100000:
+                    printf(f"RSP BODY: <{_ctype or 'binary'}, {_blen} bytes>", "DEBUG")
+                else:
+                    try:
+                        printf(f"RSP BODY: {json.dumps(response.json(), ensure_ascii=False)}", "DEBUG")
+                    except:
+                        printf(f"RSP BODY: {response.text[:1000]}", "DEBUG")
                 printf(f"===== [REQUEST END] =====\n", "DEBUG")
                 
             return response
@@ -484,21 +490,34 @@ class DdddocrClient:
         return False, "识别超时"
 
 ###################### 慧生活798核心类 (HSH) ######################
+_SCORE_SUMMARY_CACHE = {}
+_SCORE_SUMMARY_CACHE_TTL = 60
+
+
 class HSH:
 
-    def _get_remote_sign(self, ad_id, uid, platform="app"):
+    def _get_remote_sign(self, ad_id, uid, platform="app", no_time=False, token=None, login_payload=None):
         SIGN_API_URL = "https://yuhualhh.250666.xyz/api/huishenghuo_sign.php"
         SIGN_API_KEY = "feiwu-cnmb-nmsl"
 
-        payload = {
-            "adId": ad_id,
-            "uid": str(uid),
-            "token": str(self.token),
-            "apiKey": SIGN_API_KEY,
-            # 通道决定 salt 与时间对齐粒度: app(1,1)=10秒 / 小程序(1,5)=30秒
-            # 必须与 _request_safe 送出的请求头保持一致, 否则服务端回 -1 验签失败
-            "platform": "mp" if platform == "zfb" else "app",
-        }
+        if login_payload is not None:
+            payload = {
+                "apiKey": SIGN_API_KEY,
+                "mode": "login",
+                "payload": login_payload,
+                "uid": str(uid),
+                "token": str(self.token if token is None else token),
+            }
+        else:
+            payload = {
+                "adId": ad_id,
+                "uid": str(uid),
+                "token": str(self.token if token is None else token),
+                "apiKey": SIGN_API_KEY,
+                "platform": "mp" if platform in ("zfb", "mp") else "app",
+            }
+            if no_time:
+                payload["noTime"] = True
     
         for i in range(3):
             try:
@@ -547,8 +566,13 @@ class HSH:
                     continue
     
         return ""
-        
-    def __init__(self, token, session=None, platform="app"):
+
+    def _get_login_sign(self, payload_obj):
+        return self._get_remote_sign(
+            "", "", platform="mp", token="", login_payload=payload_obj
+        )
+
+    def __init__(self, token, session=None, platform="app", login=False):
         self.session = session or requests.Session()
         self.token = token
         self.platform = platform
@@ -557,7 +581,7 @@ class HSH:
             self.headers = {
                 "Authorization": self.token,
                 "ApplicationType": "1,5",
-                "VersionCode": "2.0.175",
+                "VersionCode": "2.0.190" if login else "2.0.175",
                 "x-release-type": "ONLINE",
                 "alipayMiniMark": "1ZxYH945puiakh7m2yDcX+Dej067vmY/qfe6yORlQlIZWWiuTvpKpHx9t9009Lfz2j/PolGxbV6wcdJEpTRmt6QaUTKpvy5JrWJcv/tw8iE=",
                 "Referer": "https://2019061465519660.hybrid.alipay-eco.com/2019061465519660/0.2.2609141412.57/index.html",
@@ -565,12 +589,22 @@ class HSH:
                 "Accept": "*/*",
                 "Host": "i.ilife798.com"
             }
+        elif platform == "wx":
+            self.headers = {
+                "Authorization": self.token,
+                "ApplicationType": "1,3",
+                "VersionCode": "3.0.01",
+                "content-type": "application/json",
+                "Referer": "https://servicewechat.com/wx323c760258f7b5a4/17/page-frame.html",
+                "User-Agent": "Mozilla/5.0 (Linux; Android 15; RMX5060 Build/AP3A.240617.008; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/150.0.7871.189 Mobile Safari/537.36 XWEB/1500213 MMWEBSDK/20260604 MMWEBID/1393 MicroMessenger/8.0.77.3160(0x28004D32) WeChat/arm64 Weixin NetType/5G Language/zh_CN ABI/arm64 MiniProgramEnv/android",
+                "Host": "i.ilife798.com"
+            }
         else:
             self.headers = {
                 "Authorization": self.token,
                 "ApplicationType": "1,1",
-                "VersionCode": "3.1.10",
-                "user-agent": "Android_ilife798_3.1.10",
+                "VersionCode": "3.1.11" if login else "3.1.10",
+                "user-agent": "Android_ilife798_3.1.11" if login else "Android_ilife798_3.1.10",
                 "Host": "i.ilife798.com"
             }
         self.stop_reason = None
@@ -654,15 +688,21 @@ class HSH:
                 
         return False, "验证码识别失败次数过多，请稍后再试"
 
-    def login_by_sms_code(self, phone, sms_code):
-        """使用短信验证码登录"""
+    def login_by_sms_code(self, phone, sms_code, open_code=None):
         if DEBUG: printf(f"正在尝试短信登录: {phone} code={sms_code}", "INFO")
-        url = "https://i.ilife798.com/api/v1/acc/login"
         payload = {
             "authCode": sms_code,
             "un": phone
         }
-        
+        if open_code:
+            payload["openCode"] = str(open_code)
+        sign = self._get_login_sign(payload)
+        if not sign and self.platform == "wx":
+            return False, "获取登录签名失败）"
+        url = "https://i.ilife798.com/api/v1/acc/login"
+        if sign:
+            url += f"?sign={sign}"
+
         try:
             res = self._send_request('POST', url, json=payload)
             if res:
@@ -726,7 +766,108 @@ class HSH:
         except Exception:
             return False, "响应解析失败"
 
-    def get_total_score(self):
+    def fetch_all_score_history(self):
+        base = "https://i.ilife798.com/api/v1/acc/score/score-lst"
+        records = []
+        total = 0
+        page = 0
+        page_size = 5000
+        while page < 50:
+            url = f"{base}?page={page}&size={page_size}&hasCount=true"
+            res = self._send_request('GET', url)
+            if not res:
+                return None
+            try:
+                data = res.json()
+            except Exception:
+                return None
+            if not isinstance(data, dict) or data.get('code') != 0:
+                return None
+            batch = data.get('data') or []
+            if page == 0:
+                try:
+                    total = int(data.get('size') or 0)
+                except Exception:
+                    total = 0
+            records.extend(batch)
+            if not batch:
+                break
+            if total and len(records) >= total:
+                break
+            if len(batch) < page_size:
+                if total and len(records) < total and page_size > 1000:
+                    page = len(records) // 1000
+                    page_size = 1000
+                    continue
+                break
+            if page_size == 5000:
+                page = len(records) // 1000
+                page_size = 1000
+            else:
+                page += 1
+        return records
+
+    def get_total_score_from_history(self, force=False):
+        cache_key = str(self.token)
+        now_ts = time.time()
+        if not force:
+            cached = _SCORE_SUMMARY_CACHE.get(cache_key)
+            if cached and now_ts - cached['ts'] < _SCORE_SUMMARY_CACHE_TTL:
+                return True, cached['total']
+
+        records = self.fetch_all_score_history()
+        if records is None:
+            return False, {"code": None, "msg": "积分流水读取失败"}
+
+        earn = 0.0
+        spend = 0.0
+        today_earn = 0.0
+        today_spend = 0.0
+        now = datetime.now()
+        today_start_ms = int(datetime(now.year, now.month, now.day).timestamp() * 1000)
+
+        for item in records:
+            data_obj = item.get('data') or {}
+            try:
+                score_val = float(data_obj.get('score') or 0)
+            except Exception:
+                score_val = 0.0
+            is_spend = item.get('type') == 107 or data_obj.get('type') == 107
+            if is_spend:
+                try:
+                    spend_val = float(data_obj.get('spend') or data_obj.get('score') or 0)
+                except Exception:
+                    spend_val = abs(score_val)
+                spend += abs(spend_val)
+            else:
+                earn += score_val
+
+            try:
+                ctime = int(item.get('ctime') or 0)
+            except Exception:
+                ctime = 0
+            if ctime >= today_start_ms:
+                if is_spend:
+                    try:
+                        today_spend += float(data_obj.get('spend', data_obj.get('score', 0)) or 0)
+                    except Exception:
+                        pass
+                else:
+                    today_earn += score_val
+
+        total = earn - spend
+        total_str = str(int(total)) if float(total).is_integer() else str(total)
+        today_str = str(int(today_earn)) if float(today_earn).is_integer() else str(today_earn)
+        spend_str = str(int(today_spend)) if float(today_spend).is_integer() else str(today_spend)
+        _SCORE_SUMMARY_CACHE[cache_key] = {
+            'total': total_str,
+            'today': today_str,
+            'spend': spend_str,
+            'ts': now_ts,
+        }
+        return True, total_str
+
+    def get_total_score(self, force=False):
         """获取当前总积分; 返回 (True, 分数) 或 (False, 失败响应 dict, 保留 code 供上层判定)"""
         url = "https://i.ilife798.com/api/v1/acc/score/mission-lst"
         res = self._send_request('GET', url)
@@ -739,11 +880,21 @@ class HSH:
         if not isinstance(data, dict):
             return False, {"code": None, "msg": "响应格式异常"}
         if data.get('code') == 0:
-            return True, str(data.get('data', {}).get('accScoreRsp', {}).get('score', '0'))
+            payload = data.get('data') or {}
+            acc = payload.get('accScoreRsp') if isinstance(payload, dict) else None
+            score = acc.get('score') if isinstance(acc, dict) else None
+            if score is not None:
+                return True, str(score)
+            if DEBUG:
+                printf("mission-lst 无 data，回退到积分流水计算总积分", "WARN")
+            return self.get_total_score_from_history(force=force)
         return False, data
 
     def get_today_score(self):
         """获取今日获取的积分; 返回 (True, 分数) 或 (False, 失败响应 dict)"""
+        cached = _SCORE_SUMMARY_CACHE.get(str(self.token))
+        if cached and time.time() - cached['ts'] < _SCORE_SUMMARY_CACHE_TTL:
+            return True, cached['today']
         url = "https://i.ilife798.com/api/v1/acc/score/score-lst?page=0&size=20&hasCount=true"
         res = self._send_request('GET', url)
         if not res: return False, {"code": None, "msg": "网络请求失败"}
@@ -784,6 +935,9 @@ class HSH:
       
     def get_today_spend(self):
         """获取今日消耗的积分; 返回 (True, 分数) 或 (False, 失败响应 dict)"""
+        cached = _SCORE_SUMMARY_CACHE.get(str(self.token))
+        if cached and time.time() - cached['ts'] < _SCORE_SUMMARY_CACHE_TTL:
+            return True, cached['spend']
         url = "https://i.ilife798.com/api/v1/acc/score/score-lst?page=0&size=20&hasCount=true"
         res = self._send_request('GET', url)
         if not res: return False, {"code": None, "msg": "网络请求失败"}
@@ -2284,7 +2438,7 @@ def dev_end(did, view, uid=None):
         # 记录结算前积分
         score_before = None
         try:
-            sb_ok, sb_val = hsh.get_total_score()
+            sb_ok, sb_val = hsh.get_total_score(force=True)
             score_before = int(sb_val) if sb_ok else None
         except Exception:
             score_before = None
@@ -2303,7 +2457,7 @@ def dev_end(did, view, uid=None):
         # 结算后积分, 计算本次消耗
         score_after = None
         try:
-            sa_ok, sa_val = hsh.get_total_score()
+            sa_ok, sa_val = hsh.get_total_score(force=True)
             score_after = int(sa_val) if sa_ok else None
         except Exception:
             score_after = None
@@ -2504,11 +2658,9 @@ today_time = str(datetime.now().date())
 
 def login():
     """账号登录"""
-    login_guide = """
-=====登录方式=====
+    login_guide = """=====登录方式=====
 [1] Token登录
-[2] 手机号登录 (APP)
-[3] 手机号登录 (ZFB)
+[2] 手机号登录
 ------------------
 回复数字选择方式
 回复"q"退出"""
@@ -2527,9 +2679,7 @@ def login():
         if choice == '1':
             token_online_login()
         elif choice == '2':
-            sms_login_interaction(platform="app")
-        elif choice == '3':
-            sms_login_interaction(platform="zfb")
+            sms_login_interaction()
         else:
             sender.reply("❌ 无效的选择")
             return
