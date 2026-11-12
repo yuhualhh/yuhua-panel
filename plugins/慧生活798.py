@@ -7,7 +7,7 @@
 # [platform: qq,qb,wx,gw,sb,wb,tg,tb,qx,xy,ip]
 # [priority: 9999999999999999999]
 # [public: true]
-# [version: 1.2.1]
+# [version: 1.2.2]
 # [price: 0]
 # [author: 羽化]
 # [service: ]
