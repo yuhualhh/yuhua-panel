@@ -7,7 +7,7 @@
 # [platform: qq,qb,wx,gw,sb,wb,tg,tb,qx,xy,ip]
 # [priority: 9999999999999999999]
 # [public: true]
-# [version: 1.2.2]
+# [version: 1.2.3]
 # [price: 0]
 # [author: 羽化]
 # [service: ]
@@ -238,7 +238,7 @@ def token_online_login():
 
     process_login_success(token)
 
-def sms_login_interaction():
+def sms_login_interaction(platform="app"):
     """
     【短信登录功能】
     自动处理算术验证码并发送短信
@@ -263,8 +263,8 @@ def sms_login_interaction():
         return
 
     sender.reply("正在过数字计算...")
-    
-    hsh = HSH(token="", platform="wx", login=True)
+
+    hsh = HSH(token="", platform=platform, login=True)
     
     # 尝试发送短信（含验证码识别重试逻辑）
     send_ok, send_msg = hsh.send_sms_with_captcha(phone)
@@ -496,14 +496,14 @@ _SCORE_SUMMARY_CACHE_TTL = 60
 
 class HSH:
 
-    def _get_remote_sign(self, ad_id, uid, platform="app", no_time=False, token=None, login_payload=None):
+    def _get_remote_sign(self, ad_id, uid, platform="app", no_time=False, token=None, login_payload=None, login_mode="login"):
         SIGN_API_URL = "https://yuhualhh.250666.xyz/api/huishenghuo_sign.php"
         SIGN_API_KEY = "feiwu-cnmb-nmsl"
 
         if login_payload is not None:
             payload = {
                 "apiKey": SIGN_API_KEY,
-                "mode": "login",
+                "mode": login_mode,
                 "payload": login_payload,
                 "uid": str(uid),
                 "token": str(self.token if token is None else token),
@@ -567,9 +567,9 @@ class HSH:
     
         return ""
 
-    def _get_login_sign(self, payload_obj):
+    def _get_login_sign(self, payload_obj, mode="login"):
         return self._get_remote_sign(
-            "", "", platform="mp", token="", login_payload=payload_obj
+            "", "", platform="mp", token="", login_payload=payload_obj, login_mode=mode
         )
 
     def __init__(self, token, session=None, platform="app", login=False):
@@ -603,8 +603,9 @@ class HSH:
             self.headers = {
                 "Authorization": self.token,
                 "ApplicationType": "1,1",
-                "VersionCode": "3.1.11" if login else "3.1.10",
-                "user-agent": "Android_ilife798_3.1.11" if login else "Android_ilife798_3.1.10",
+                "VersionCode": "3.1.9",
+                "user-agent": "Android_ilife798_3.1.9",
+                "Accept-Language": "zh-Hans-CN;q=1",
                 "Host": "i.ilife798.com"
             }
         self.stop_reason = None
@@ -621,6 +622,8 @@ class HSH:
                         del req_headers[old_k]
                 req_headers[k] = v
             del kwargs['headers']
+        req_headers = {k: v for k, v in req_headers.items()
+                       if not (k.lower() == 'authorization' and not v)}
         
         try:
             return send_request_global(method, url, headers=req_headers, **kwargs)
@@ -690,15 +693,16 @@ class HSH:
 
     def login_by_sms_code(self, phone, sms_code, open_code=None):
         if DEBUG: printf(f"正在尝试短信登录: {phone} code={sms_code}", "INFO")
+        is_app = (self.platform == "app")
         payload = {
             "authCode": sms_code,
             "un": phone
         }
-        if open_code:
+        if open_code and not is_app:
             payload["openCode"] = str(open_code)
-        sign = self._get_login_sign(payload)
-        if not sign and self.platform == "wx":
-            return False, "获取登录签名失败）"
+        sign = self._get_login_sign(payload, mode="login_app" if is_app else "login")
+        if not sign:
+            return False, "获取登录签名失败"
         url = "https://i.ilife798.com/api/v1/acc/login"
         if sign:
             url += f"?sign={sign}"
@@ -1052,8 +1056,7 @@ class HSH:
         return True, data.get('data', {})
 
     def dev_start(self, did):
-        """立即使用/开始计费 (对应抓包 /api/v1/dev/start)"""
-        url = f"https://i.ilife798.com/api/v1/dev/start?did={did}&upgrade=true&ptype=21&args=&rcp=false&cnt=1"
+        url = f"https://i.ilife798.com/api/v1/dev/start?did={did}&upgrade=true&ptype=91&rcp=false"
         res = self._send_request('GET', url)
         if not res: return False, "网络请求失败"
         try:
@@ -1061,7 +1064,13 @@ class HSH:
         except Exception:
             return False, "响应解析失败"
         if data.get('code') != 0:
-            return False, data.get('msg', f"开始结算失败 code={data.get('code')}")
+            code = data.get('code')
+            msg = data.get('msg') or f"开始失败 code={code}"
+            if code == -21:
+                msg = "仅通过APP手机号登录方式可用"
+            elif code == -99:
+                msg = "登录状态已过期，请重新登录"
+            return False, msg
         return True, data.get('data', {})
 
     def dev_end(self, did):
@@ -2660,7 +2669,8 @@ def login():
     """账号登录"""
     login_guide = """=====登录方式=====
 [1] Token登录
-[2] 手机号登录
+[2] 手机号登录 (APP)
+[3] 手机号登录 (WX)
 ------------------
 回复数字选择方式
 回复"q"退出"""
@@ -2674,12 +2684,14 @@ def login():
     elif choice.lower() == 'q':
         sender.reply("✅ 已退出操作")
         return
-        
+
     try:
         if choice == '1':
             token_online_login()
         elif choice == '2':
-            sms_login_interaction()
+            sms_login_interaction("app")
+        elif choice == '3':
+            sms_login_interaction("wx")
         else:
             sender.reply("❌ 无效的选择")
             return
